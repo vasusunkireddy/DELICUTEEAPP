@@ -23,6 +23,7 @@ router.get('/user/:userId', async (req, res) => {
            oi.name,
            oi.qty AS quantity,
            oi.price,
+           oi.rating AS item_rating,          -- NEW: surface per-item rating
            m.image_url AS menu_image,
            oi.image AS fallback_image
          FROM order_items oi
@@ -38,6 +39,7 @@ router.get('/user/:userId', async (req, res) => {
         name: it.name,
         quantity: it.quantity,
         price: it.price,
+        rating: it.item_rating ?? null,       // NEW
         image_url: it.menu_image || it.fallback_image || null,
       }));
     }
@@ -138,39 +140,64 @@ router.patch('/:id/cancel', async (req, res) => {
 
 /**
  * POST /api/customer-orders/:id/rate
- * Submit a rating (1–5) for an order.
+ * Submit a rating (1–5) for an order, with optional per-item ratings.
+ * Body: { rating: 1..5, item_ratings?: [{ menu_item_id: number, rating: 1..5 }] }
  */
 router.post('/:id/rate', async (req, res) => {
   const { id } = req.params;
-  const { rating } = req.body;
+  const { rating, item_ratings = [] } = req.body;
 
-  if (!rating || rating < 1 || rating > 5) {
-    return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'Rating must be an integer between 1 and 5' });
   }
 
+  const conn = await pool.getConnection();
   try {
-    const [[existing]] = await pool.query(
-      `SELECT rating FROM orders WHERE id = ?`,
+    await conn.beginTransaction();
+
+    const [[existing]] = await conn.query(
+      `SELECT id, rating FROM orders WHERE id = ? FOR UPDATE`,
       [id]
     );
-
     if (!existing) {
+      await conn.rollback();
       return res.status(404).json({ error: 'Order not found' });
     }
-
     if (existing.rating) {
+      await conn.rollback();
       return res.status(400).json({ error: 'You have already rated this order' });
     }
 
-    await pool.query(
+    // 1) Save overall order rating
+    await conn.query(
       `UPDATE orders SET rating = ? WHERE id = ?`,
       [rating, id]
     );
 
-    res.json({ success: true });
+    // 2) Save per-item ratings (optional)
+    if (Array.isArray(item_ratings) && item_ratings.length) {
+      for (const ir of item_ratings) {
+        const r = Number(ir?.rating);
+        const menuItemId = Number(ir?.menu_item_id);
+        if (Number.isInteger(r) && r >= 1 && r <= 5 && Number.isInteger(menuItemId)) {
+          await conn.query(
+            `UPDATE order_items
+             SET rating = ?
+             WHERE order_id = ? AND product_id = ?`,
+            [r, id, menuItemId]
+          );
+        }
+      }
+    }
+
+    await conn.commit();
+    res.json({ success: true, message: 'Rating saved' });
   } catch (err) {
+    await conn.rollback();
     console.error('[Rate Order Error]', err);
     res.status(500).json({ error: 'Failed to rate order' });
+  } finally {
+    conn.release();
   }
 });
 

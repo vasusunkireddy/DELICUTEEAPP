@@ -5,7 +5,7 @@ const pool = require('../db');
 
 const router = express.Router();
 
-/* ✅ Middleware: Token verification */
+/* ✅ Middleware: Token verification (for POST to cart) */
 const verifyToken = (req, res, next) => {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   if (!token) return res.status(401).json({ message: 'Auth token missing' });
@@ -19,14 +19,28 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-/* ✅ GET all menu items (public) */
-router.get('/', async (req, res, next) => {
+/* ✅ GET all customer-visible items WITH ratings
+   (Removed `WHERE m.enabled = 1` because your schema doesn't have that column) */
+router.get('/', async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
-      `SELECT id, name, description, price, image_url, category
-       FROM menu_items
-       WHERE enabled = 1
-       ORDER BY id DESC`
+      `
+      SELECT
+        m.id,
+        m.name,
+        m.description,
+        m.price,
+        m.image_url,
+        m.category,
+        ROUND(AVG(oi.rating), 1) AS rating_avg,
+        COUNT(oi.rating)         AS rating_count
+      FROM menu_items m
+      LEFT JOIN order_items oi
+        ON oi.product_id = m.id
+       AND oi.rating IS NOT NULL
+      GROUP BY m.id
+      ORDER BY m.id DESC
+      `
     );
     res.json(rows);
   } catch (err) {
@@ -34,13 +48,27 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-/* ✅ GET single menu item (public) */
+/* ✅ GET single item WITH ratings (no `enabled` filter) */
 router.get('/:id', async (req, res, next) => {
   try {
     const [[item]] = await pool.query(
-      `SELECT id, name, description, price, image_url, category
-       FROM menu_items
-       WHERE id = ? AND enabled = 1`,
+      `
+      SELECT
+        m.id,
+        m.name,
+        m.description,
+        m.price,
+        m.image_url,
+        m.category,
+        ROUND(AVG(oi.rating), 1) AS rating_avg,
+        COUNT(oi.rating)         AS rating_count
+      FROM menu_items m
+      LEFT JOIN order_items oi
+        ON oi.product_id = m.id
+       AND oi.rating IS NOT NULL
+      WHERE m.id = ?
+      GROUP BY m.id
+      `,
       [req.params.id]
     );
     if (!item) return res.status(404).json({ message: 'Item not found' });
@@ -50,7 +78,7 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-/* ✅ POST to cart (secure) */
+/* ✅ POST to cart (secure) — unchanged */
 router.post('/', verifyToken, async (req, res, next) => {
   try {
     const itemId = req.body.menu_item_id ?? req.body.item_id;
