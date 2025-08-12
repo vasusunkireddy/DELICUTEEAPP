@@ -9,7 +9,7 @@ const cron = require('node-cron');
 const multer = require('multer');
 
 const pool = require('./db');
-const { broadcastNotification } = require('../utils/push'); // keep your existing util
+const { broadcastNotification } = require('./utils/push'); // keep your existing util
 
 const PORT = process.env.PORT || 3000;
 
