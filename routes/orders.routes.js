@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../db');
-const { sendOrderStatusEmail } = require('../../utils/mailer');
+const { sendOrderStatusEmail } = require('../utils/mailer');
 
 const router = express.Router();
 
