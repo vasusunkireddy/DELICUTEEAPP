@@ -7,22 +7,17 @@ const multer = require('multer');
 const path = require('path');
 const router = express.Router();
 
-// Configure multer for image uploads
+// Multer (optional; still supports local file uploads)
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // Ensure this directory exists
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname)); // Unique filename
-  },
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
 });
 const upload = multer({ storage });
 
-// GET all menu
+// GET all available menu items
 router.get('/', async (_, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM menu_items WHERE available=1');
-    console.log('Fetched menu items:', rows);
     res.json(rows);
   } catch (err) {
     console.error('Error fetching menu:', err);
@@ -30,20 +25,22 @@ router.get('/', async (_, res) => {
   }
 });
 
-// admin CRUD
+// CREATE (supports either multipart file OR image_url string from Cloudinary)
 router.post('/', auth, admin, upload.single('image'), async (req, res) => {
-  const { name, description, price, category } = req.body;
-  const image_url = req.file ? `/uploads/${req.file.filename}` : req.body.image_url || null;
-  if (!name || !price || !category) {
-    return res.status(400).json({ error: 'Name, price, and category are required' });
-  }
   try {
+    const { name, description, price, category, image_url: bodyUrl } = req.body;
+    if (!name || !price || !category) {
+      return res.status(400).json({ error: 'Name, price, and category are required' });
+    }
+
+    // Prefer uploaded file if present, else use provided URL (e.g., Cloudinary secure_url)
+    const image_url = req.file ? `/uploads/${req.file.filename}` : (bodyUrl || null);
+
     const [result] = await pool.query(
       'INSERT INTO menu_items (name, description, price, category, image_url, available) VALUES (?,?,?,?,?,?)',
-      [name, description, parseFloat(price), category, image_url, 1]
+      [name, description || null, parseFloat(price), category, image_url, 1]
     );
     const [newItem] = await pool.query('SELECT * FROM menu_items WHERE id = ?', [result.insertId]);
-    console.log('Created item:', newItem[0]);
     res.status(201).json(newItem[0]);
   } catch (err) {
     console.error('Error creating menu item:', err);
@@ -51,34 +48,37 @@ router.post('/', auth, admin, upload.single('image'), async (req, res) => {
   }
 });
 
+// UPDATE (won’t overwrite image_url unless a new one is provided)
 router.put('/:id', auth, admin, upload.single('image'), async (req, res) => {
-  const { name, description, price, category, available = 1 } = req.body;
-  const image_url = req.file ? `/uploads/${req.file.filename}` : req.body.image_url || null;
-  if (!name || !price || !category) {
-    return res.status(400).json({ error: 'Name, price, and category are required' });
-  }
   try {
     const id = parseInt(req.params.id);
-    console.log('Updating item with ID:', id, 'Body:', req.body, 'File:', req.file);
-    const [check] = await pool.query('SELECT id FROM menu_items WHERE id = ?', [id]);
-    if (check.length === 0) {
-      console.log('Item not found for ID:', id);
-      return res.status(404).json({ error: 'Menu item not found' });
+    const { name, description, price, category } = req.body;
+
+    if (!name || !price || !category) {
+      return res.status(400).json({ error: 'Name, price, and category are required' });
     }
-    const [result] = await pool.query(
+
+    const [existingRows] = await pool.query('SELECT * FROM menu_items WHERE id = ?', [id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Menu item not found' });
+    const existing = existingRows[0];
+
+    // Determine final image URL:
+    // - If a new file uploaded -> use it
+    // - Else if body has image_url (Cloudinary) -> use it
+    // - Else keep existing
+    const incomingUrl = req.body.image_url;
+    const finalImageUrl = req.file
+      ? `/uploads/${req.file.filename}`
+      : (typeof incomingUrl === 'string' && incomingUrl.trim() !== '' ? incomingUrl.trim() : existing.image_url);
+
+    const available = req.body.available !== undefined ? parseInt(req.body.available) : existing.available;
+
+    await pool.query(
       'UPDATE menu_items SET name=?, description=?, price=?, category=?, image_url=?, available=? WHERE id=?',
-      [name, description, parseFloat(price), category, image_url, parseInt(available), id]
+      [name, description || null, parseFloat(price), category, finalImageUrl, available, id]
     );
-    if (result.affectedRows === 0) {
-      console.log('No rows affected for ID:', id);
-      return res.status(404).json({ error: 'Menu item not found' });
-    }
+
     const [updatedItem] = await pool.query('SELECT * FROM menu_items WHERE id = ?', [id]);
-    if (!updatedItem[0]) {
-      console.log('Updated item not found for ID:', id);
-      return res.status(404).json({ error: 'Menu item not found after update' });
-    }
-    console.log('Updated item:', updatedItem[0]);
     res.json(updatedItem[0]);
   } catch (err) {
     console.error('Error updating menu item:', err);
@@ -86,15 +86,12 @@ router.put('/:id', auth, admin, upload.single('image'), async (req, res) => {
   }
 });
 
+// DELETE
 router.delete('/:id', auth, admin, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const [result] = await pool.query('DELETE FROM menu_items WHERE id=?', [id]);
-    if (result.affectedRows === 0) {
-      console.log('Item not found for deletion, ID:', id);
-      return res.status(404).json({ error: 'Menu item not found' });
-    }
-    console.log('Deleted item with ID:', id);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Menu item not found' });
     res.json({ message: 'Deleted' });
   } catch (err) {
     console.error('Error deleting menu item:', err);

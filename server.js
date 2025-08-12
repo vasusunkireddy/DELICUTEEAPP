@@ -9,13 +9,13 @@ const cron = require('node-cron');
 const multer = require('multer');
 
 const pool = require('./db');
-const { broadcastNotification } = require('../utils/push');
+const { broadcastNotification } = require('./utils/push'); // keep your existing util
 
 const PORT = process.env.PORT || 3000;
 
 /* ─── Route imports ─── */
 const authRoutes = require('./routes/auth.routes');
-const menuRoutes = require('./routes/menu.routes');
+const menuRoutes = require('./routes/menu.routes'); // see file below
 const ordersRoutes = require('./routes/order.routes');
 const myOrdersRoutes = require('./routes/myorders.routes');
 const cartRoutes = require('./routes/cart.routes');
@@ -37,74 +37,58 @@ const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
 
-/* ─── Ensure uploads directories ─── */
-const bannersDir = path.join(__dirname, 'uploads', 'banners');
+/* ─── Ensure uploads directories (UNIFIED: lowercase) ─── */
+const uploadsBase = path.join(__dirname, 'uploads');  // unified base
+const bannersDir  = path.join(uploadsBase, 'banners');
+const avatarsDir  = path.join(uploadsBase, 'avatars');
+const messagesDir = path.join(uploadsBase, 'messages');
+
 fs.mkdirSync(bannersDir, { recursive: true });
-
-const avatarsDir = path.join(__dirname, 'Uploads', 'avatars');
 fs.mkdirSync(avatarsDir, { recursive: true });
-
-const messagesDir = path.join(__dirname, 'Uploads', 'messages');
 fs.mkdirSync(messagesDir, { recursive: true });
 
 console.log('Serving avatars from:', avatarsDir);
 console.log('Serving message images from:', messagesDir);
 
-/* ─── Multer setup for file uploads ─── */
+/* ─── Multer setup for chat/profile uploads ─── */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    if (file.fieldname === 'avatar') {
-      cb(null, avatarsDir);
-    } else if (file.fieldname === 'image') {
-      cb(null, messagesDir);
-    } else {
-      cb(new Error('Invalid fieldname'), null);
-    }
+    if (file.fieldname === 'avatar') return cb(null, avatarsDir);
+    if (file.fieldname === 'image')  return cb(null, messagesDir); // chat images
+    return cb(new Error('Invalid fieldname'), null);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, `${file.fieldname}_${uniqueSuffix}${path.extname(file.originalname)}`);
+    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, `${file.fieldname}_${unique}${path.extname(file.originalname)}`);
   },
 });
-
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
-  if (allowedTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Only JPEG, PNG, and GIF images are allowed'), false);
-  }
+  const ok = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimetype);
+  cb(ok ? null : new Error('Only JPEG, PNG, GIF, WebP are allowed'), ok);
 };
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-});
+const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
 
 /* ─── Express app setup ─── */
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // allow JSON bodies with image_url
 app.use(compression());
 app.use(morgan('dev'));
 
-/* ─── Static files ─── */
+/* ─── Static files (match what routes write) ─── */
 app.use('/static/banners', express.static(bannersDir));
 app.use('/uploads/avatars', express.static(avatarsDir));
 app.use('/uploads/messages', express.static(messagesDir));
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
+app.use('/uploads', express.static(uploadsBase));  // serves /uploads/* (lowercase)
 
 /* ─── Upload endpoint for chat images ─── */
 app.post('/upload', upload.single('image'), (req, res) => {
   try {
-    if (!req.file) {
-      console.log('Upload failed: No file provided');
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-    const imageUrl = `/uploads/messages/${req.file.filename}`;
-    console.log('File uploaded successfully:', imageUrl);
-    res.json({ url: imageUrl });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const rel = `/uploads/messages/${req.file.filename}`;
+    const abs = `${req.protocol}://${req.get('host')}${rel}`; // absolute URL helps RN
+    console.log('File uploaded:', rel);
+    res.json({ url: abs, path: rel });
   } catch (e) {
     console.error('Upload error:', e.message);
     res.status(400).json({ error: e.message });
@@ -118,7 +102,7 @@ app.use('/api/menubrowse', browseRoutes);
 app.use('/api/addresses', addressesRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/cart', cartRoutes);
-app.use('/api/menu', menuRoutes);
+app.use('/api/menu', menuRoutes); // <— menu routes below
 app.use('/api/orders', ordersRoutes);
 app.use('/api/myorders', myOrdersRoutes);
 app.use('/api/customer-orders', customerOrdersRoutes);
@@ -147,7 +131,7 @@ app.use((req, res) => {
 
 /* ─── Error handler ─── */
 app.use((err, _req, res, _next) => {
-  console.error('❌ Unhandled error:', err.stack);
+  console.error('❌ Unhandled error:', err.stack || err);
   res.status(500).json({ error: '🔥 Internal server error', message: err.message });
 });
 
