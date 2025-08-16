@@ -1,65 +1,67 @@
 const express = require('express');
-const router = express.Router();
+const jwt = require('jsonwebtoken');
 const pool = require('../db');
 
-router.get('/user/:userId', async (req, res) => {
-  const { userId } = req.params;
+const router = express.Router();
 
+function verifyToken(req, res, next) {
+  const token = (req.headers.authorization || '').replace('Bearer ', '');
+  if (!token) return res.status(401).json({ message: 'Auth token missing' });
   try {
-    const [orders] = await pool.query(
-      `SELECT id, total, status, created_at, delivered_at, rating, review 
-       FROM orders 
-       WHERE user_id = ? 
-       ORDER BY created_at DESC`,
-      [userId]
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ message: 'Invalid or expired token' });
+  }
+}
+router.use(verifyToken);
+
+router.post('/', async (req, res) => {
+  try {
+    const { menu_item_id, quantity } = req.body;
+    if (!Number.isFinite(menu_item_id) || menu_item_id <= 0) {
+      return res.status(400).json({ message: 'Invalid menu item ID' });
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return res.status(400).json({ message: 'Invalid quantity' });
+    }
+
+    // Validate menu item
+    const [menuItem] = await pool.query(
+      `SELECT id, name, price, image_url, is_active FROM menu_items WHERE id = ? AND is_active = 1 LIMIT 1`,
+      [menu_item_id]
+    );
+    if (!menuItem.length) {
+      return res.status(404).json({ message: 'Menu item not found' });
+    }
+
+    // Add to cart
+    const [result] = await pool.query(
+      `INSERT INTO cart (user_id, menu_item_id, quantity, price, name, image_url)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        req.user.id,
+        menu_item_id,
+        quantity,
+        menuItem[0].price,
+        menuItem[0].name,
+        menuItem[0].image_url || null,
+      ]
     );
 
-    if (!orders.length) return res.status(200).json([]);
-
-    const orderIds = orders.map(o => o.id);
-
-    const [items] = await pool.query(
-      `SELECT 
-         oi.id AS item_id,
-         oi.order_id,
-         oi.product_id,
-         oi.qty AS quantity,
-         oi.price,
-         oi.name AS item_name,
-         oi.image AS item_image,
-         m.name AS menu_name,
-         m.image_url AS menu_image_url
-       FROM order_items oi
-       LEFT JOIN menu_items m ON oi.product_id = m.id
-       WHERE oi.order_id IN (?)`,
-      [orderIds]
-    );
-
-    const itemsByOrder = items.reduce((acc, item) => {
-      const imageUrl = item.menu_image_url || item.item_image || null;
-      const formattedImage = imageUrl?.startsWith('/') ? `http://192.168.1.4:3000${imageUrl}` : imageUrl;
-
-      if (!acc[item.order_id]) acc[item.order_id] = [];
-      acc[item.order_id].push({
-        item_id: item.item_id,
-        product_id: item.product_id,
-        name: item.menu_name || item.item_name || 'Unnamed',
-        quantity: item.quantity || 1,
-        price: parseFloat(item.price || 0).toFixed(2),
-        image_url: formattedImage || null,
-      });
-      return acc;
-    }, {});
-
-    const enriched = orders.map(order => ({
-      ...order,
-      items: itemsByOrder[order.id] || [],
-    }));
-
-    res.status(200).json(enriched);
-
+    res.status(201).json({ id: result.insertId, menu_item_id, quantity });
   } catch (err) {
-    console.error('[MyOrders] Error:', err.message);
+    console.error('[cart.js] Add to cart error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+router.delete('/', async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM cart WHERE user_id = ?`, [req.user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[cart.js] Clear cart error:', err);
     res.status(500).json({ message: 'Internal server error' });
   }
 });

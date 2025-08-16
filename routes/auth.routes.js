@@ -192,44 +192,60 @@ router.put('/users/:id/phone', async (req, res) => {
   }
 });
 
+
 // ─────────────────── Google Login ───────────────────
 router.post('/google-login', async (req, res) => {
-  const { access_token } = req.body;
-  if (!access_token) return res.status(400).json({ message: 'Access token required' });
+  const { id_token } = req.body; // Expecting id_token from Expo frontend
+  if (!id_token) {
+    return res.status(400).json({ message: 'ID token required' });
+  }
 
   try {
-    const ticket = await googleClient.getTokenInfo(access_token);
-    const googleId = ticket.sub;
-    const email = ticket.email;
+    // ✅ Verify the ID token directly
+    const ticket = await googleClient.verifyIdToken({
+      idToken: id_token,
+      audience: process.env.GOOGLE_CLIENT_ID, // Your Google client ID
+    });
+
+    const payload = ticket.getPayload();
+    const googleId = payload.sub;
+    const email = payload.email;
+    const fullName = payload.name || 'Google User';
 
     if (!googleId || !email) {
-      return res.status(400).json({ message: 'Invalid Google token' });
+      return res.status(400).json({ message: 'Invalid Google token payload' });
     }
 
     let user;
-    const [byGoogleId] = await pool.query('SELECT * FROM users WHERE google_id = ?', [googleId]);
 
+    // Check if user already linked with this Google ID
+    const [byGoogleId] = await pool.query('SELECT * FROM users WHERE google_id = ?', [googleId]);
     if (byGoogleId.length) {
       user = byGoogleId[0];
     } else {
+      // Check if same email exists
       const [byEmail] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
       if (byEmail.length) {
         user = byEmail[0];
+        // Link Google account
         await pool.query('UPDATE users SET google_id = ? WHERE id = ?', [googleId, user.id]);
       } else {
+        // Create a new user account
         const [ins] = await pool.query(
           'INSERT INTO users (full_name, email, google_id, phone, password_hash, role) VALUES (?, ?, ?, ?, ?, ?)',
-          ['Google User', email, googleId, '', 'google_placeholder', 'customer']
+          [fullName, email, googleId, '', 'google_placeholder', 'customer']
         );
         const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [ins.insertId]);
         user = rows[0];
       }
     }
 
+    // Generate JWT token
     const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, {
       expiresIn: '7d',
     });
 
+    // Send response
     res.json({
       token,
       user: {
@@ -245,5 +261,6 @@ router.post('/google-login', async (req, res) => {
     res.status(500).json({ message: 'Google login failed' });
   }
 });
+
 
 module.exports = router;

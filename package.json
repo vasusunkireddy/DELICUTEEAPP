@@ -19,6 +19,7 @@
     "@react-navigation/stack": "^6.4.1",
     "axios": "^1.10.0",
     "bcryptjs": "^3.0.2",
+    "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
     "date-fns": "^4.1.0",
     "dayjs": "^1.11.13",
@@ -41,6 +42,7 @@
     "express": "^5.1.0",
     "express-validator": "^7.2.1",
     "firebase": "^12.0.0",
+    "firebase-admin": "^13.4.0",
     "google-auth-library": "^10.2.1",
     "jsonwebtoken": "^9.0.2",
     "lodash": "^4.17.21",
@@ -61,7 +63,8 @@
     "react-native-screens": "~4.11.1",
     "react-native-skeleton-placeholder": "^5.2.4",
     "react-native-snap-carousel": "^3.9.1",
-    "react-native-toast-message": "^2.3.3"
+    "react-native-toast-message": "^2.3.3",
+    "sanitize-html": "^2.17.0"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",

@@ -9,17 +9,18 @@ const cron = require('node-cron');
 const multer = require('multer');
 
 const pool = require('./db');
-const { broadcastNotification } = require('./utils/push'); // keep your existing util
+const { broadcastNotification } = require('./utils/push');
 
 const PORT = process.env.PORT || 3000;
+const app = express();
 
 /* ─── Route imports ─── */
 const authRoutes = require('./routes/auth.routes');
-const menuRoutes = require('./routes/menu.routes');              // Admin menu (keep)
+const menuRoutes = require('./routes/menu.routes');
 const ordersRoutes = require('./routes/order.routes');
 const myOrdersRoutes = require('./routes/myorders.routes');
 const cartRoutes = require('./routes/cart.routes');
-const browseRoutes = require('./routes/menubrowse.routes');      // ✅ Customer browse (use this for app)
+const browseRoutes = require('./routes/menubrowse.routes');
 const addressesRoutes = require('./routes/addresses.routes');
 const profileRoutes = require('./routes/profile.route');
 const paymentsRoutes = require('./routes/payments.routes');
@@ -36,11 +37,14 @@ const contactUsRoutes = require('./routes/contactus.routes');
 const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
+const categoriesRoutes = require('./routes/categories.routes'); 
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); // ✅ NEW
+const waitlistRoutes = require("./routes/waitlist.routes");
 
-/* ─── Ensure uploads directories (UNIFIED: lowercase) ─── */
+/* ─── Ensure uploads directories ─── */
 const uploadsBase = path.join(__dirname, 'uploads');
-const bannersDir  = path.join(uploadsBase, 'banners');
-const avatarsDir  = path.join(uploadsBase, 'avatars');
+const bannersDir = path.join(uploadsBase, 'banners');
+const avatarsDir = path.join(uploadsBase, 'avatars');
 const messagesDir = path.join(uploadsBase, 'messages');
 
 fs.mkdirSync(bannersDir, { recursive: true });
@@ -54,7 +58,7 @@ console.log('Serving message images from:', messagesDir);
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'avatar') return cb(null, avatarsDir);
-    if (file.fieldname === 'image')  return cb(null, messagesDir);
+    if (file.fieldname === 'image') return cb(null, messagesDir);
     return cb(new Error('Invalid fieldname'), null);
   },
   filename: (req, file, cb) => {
@@ -68,14 +72,13 @@ const fileFilter = (req, file, cb) => {
 };
 const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
 
-/* ─── Express app setup ─── */
-const app = express();
+/* ─── Middleware ─── */
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(compression());
 app.use(morgan('dev'));
 
-/* ─── Static files ─── */
+/* ─── Static file serving ─── */
 app.use('/static/banners', express.static(bannersDir));
 app.use('/uploads/avatars', express.static(avatarsDir));
 app.use('/uploads/messages', express.static(messagesDir));
@@ -95,17 +98,12 @@ app.post('/upload', upload.single('image'), (req, res) => {
   }
 });
 
-/* ─── API routes (customer uses /api/menubrowse) ─── */
+/* ─── API Routes ─── */
 app.use('/api/auth', authRoutes);
-
-/* Customer-facing browse (list + details + add to cart via POST on this router) */
-app.use('/api/menubrowse', browseRoutes);  // ✅ primary for the app
-app.use('/api/browse', browseRoutes);      // alias (keep if you already use it)
-
-/* Admin menu (keep mounted for admin tools) */
+app.use('/api/menubrowse', browseRoutes);
+app.use('/api/browse', browseRoutes); // alias
 app.use('/api/menu', menuRoutes);
-
-/* Other APIs */
+app.use('/api/categories', categoriesRoutes);
 app.use('/api/addresses', addressesRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/cart', cartRoutes);
@@ -125,9 +123,10 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/contactus', contactUsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/zones', deliveryZonesRoutes); // ✅ NEW
+app.use("/api/waitlist", waitlistRoutes);
 
-/* ── TEMP SAFETY NET: redirect old client GETs from /api/menu → /api/menubrowse ──
-   (So even if the app accidentally calls /api/menu/:id, it won't 404.) */
+/* ─── Redirect old /api/menu → /api/menubrowse ─── */
 app.get('/api/menu', (_req, res) => res.redirect(308, '/api/menubrowse'));
 app.get('/api/menu/:id', (req, res) => res.redirect(308, `/api/menubrowse/${req.params.id}`));
 
@@ -146,7 +145,7 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: '🔥 Internal server error', message: err.message });
 });
 
-/* ─── Scheduled task: send due notifications every 2 min ─── */
+/* ─── Scheduled task ─── */
 cron.schedule('*/2 * * * *', async () => {
   try {
     const [due] = await pool.query(

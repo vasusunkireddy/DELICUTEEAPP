@@ -1,103 +1,140 @@
 // routes/menubrowse.routes.js
-const express = require('express');
-const jwt = require('jsonwebtoken');
-const pool = require('../db');
+const express = require("express");
+const pool = require("../db");
 
 const router = express.Router();
 
-/* ✅ Middleware: Token verification (for POST to cart) */
-const verifyToken = (req, res, next) => {
-  const token = (req.headers.authorization || '').replace('Bearer ', '');
-  if (!token) return res.status(401).json({ message: 'Auth token missing' });
-
+/* ✅ GET all items (public browse) */
+router.get("/", async (_req, res) => {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    return res.status(401).json({ message: 'Invalid or expired token' });
-  }
-};
-
-/* ✅ GET all customer-visible items WITH ratings
-   (Removed `WHERE m.enabled = 1` because your schema doesn't have that column) */
-router.get('/', async (_req, res, next) => {
-  try {
-    const [rows] = await pool.query(
-      `
+    const [rows] = await pool.query(`
       SELECT
         m.id,
         m.name,
         m.description,
         m.price,
         m.image_url,
-        m.category,
+        m.category_id,
+        c.name AS category_name,
         ROUND(AVG(oi.rating), 1) AS rating_avg,
-        COUNT(oi.rating)         AS rating_count
+        COUNT(oi.rating) AS rating_count
       FROM menu_items m
       LEFT JOIN order_items oi
-        ON oi.product_id = m.id
-       AND oi.rating IS NOT NULL
-      GROUP BY m.id
+        ON oi.product_id = m.id AND oi.rating IS NOT NULL
+      LEFT JOIN categories c
+        ON c.id = m.category_id
+      WHERE m.available = 1
+      GROUP BY m.id, c.name
       ORDER BY m.id DESC
-      `
-    );
-    res.json(rows);
+    `);
+
+    res.json(rows.map(row => ({
+      ...row,
+      price: Number(row.price),
+      category_id: row.category_id || null,
+      category_name: row.category_name || "Uncategorized",
+      rating_avg: row.rating_avg || 0,
+      rating_count: row.rating_count || 0,
+    })));
   } catch (err) {
-    next(err);
+    console.error("Error fetching menu browse:", err);
+    res.status(500).json({ error: "Failed to fetch menu items" });
   }
 });
 
-/* ✅ GET single item WITH ratings (no `enabled` filter) */
-router.get('/:id', async (req, res, next) => {
+/* ✅ GET grouped by category */
+router.get("/grouped", async (_req, res) => {
   try {
-    const [[item]] = await pool.query(
-      `
+    const [categories] = await pool.query(`
+      SELECT id, name, description, image AS image_url
+      FROM categories
+      ORDER BY name ASC
+    `);
+
+    const [items] = await pool.query(`
       SELECT
         m.id,
         m.name,
         m.description,
         m.price,
         m.image_url,
-        m.category,
+        m.category_id,
+        c.name AS category_name,
         ROUND(AVG(oi.rating), 1) AS rating_avg,
-        COUNT(oi.rating)         AS rating_count
+        COUNT(oi.rating) AS rating_count
       FROM menu_items m
       LEFT JOIN order_items oi
-        ON oi.product_id = m.id
-       AND oi.rating IS NOT NULL
-      WHERE m.id = ?
-      GROUP BY m.id
-      `,
-      [req.params.id]
-    );
-    if (!item) return res.status(404).json({ message: 'Item not found' });
-    res.json(item);
+        ON oi.product_id = m.id AND oi.rating IS NOT NULL
+      LEFT JOIN categories c
+        ON c.id = m.category_id
+      WHERE m.available = 1
+      GROUP BY m.id, c.name
+      ORDER BY m.id ASC
+    `);
+
+    const grouped = categories.map(cat => ({
+      id: cat.id,
+      name: cat.name,
+      description: cat.description || null,
+      image_url: cat.image_url || null,
+      items: items
+        .filter(i => Number(i.category_id) === Number(cat.id))
+        .map(i => ({
+          id: i.id,
+          name: i.name,
+          description: i.description || null,
+          price: Number(i.price),
+          image_url: i.image_url || null,
+          category_id: i.category_id || null,
+          category_name: i.category_name || "Uncategorized",
+          rating_avg: i.rating_avg || 0,
+          rating_count: i.rating_count || 0,
+        })),
+    }));
+
+    res.json(grouped);
   } catch (err) {
-    next(err);
+    console.error("Error fetching grouped menu browse:", err);
+    res.status(500).json({ error: "Failed to fetch grouped menu" });
   }
 });
 
-/* ✅ POST to cart (secure) — unchanged */
-router.post('/', verifyToken, async (req, res, next) => {
+/* ✅ GET single item */
+router.get("/:id", async (req, res) => {
   try {
-    const itemId = req.body.menu_item_id ?? req.body.item_id;
-    const qty = Number(req.body.quantity ?? req.body.qty ?? 1);
+    const [[item]] = await pool.query(`
+      SELECT
+        m.id,
+        m.name,
+        m.description,
+        m.price,
+        m.image_url,
+        m.category_id,
+        c.name AS category_name,
+        ROUND(AVG(oi.rating), 1) AS rating_avg,
+        COUNT(oi.rating) AS rating_count
+      FROM menu_items m
+      LEFT JOIN order_items oi
+        ON oi.product_id = m.id AND oi.rating IS NOT NULL
+      LEFT JOIN categories c
+        ON c.id = m.category_id
+      WHERE m.id = ? AND m.available = 1
+      GROUP BY m.id, c.name
+    `, [req.params.id]);
 
-    if (!itemId || qty < 1) {
-      return res.status(400).json({ message: 'menu_item_id and quantity ≥ 1 required' });
-    }
+    if (!item) return res.status(404).json({ error: "Item not found" });
 
-    await pool.query(
-      `INSERT INTO cart_items (user_id, menu_item_id, quantity)
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)`,
-      [req.user.id, itemId, qty]
-    );
-
-    res.json({ ok: true, added: qty, item_id: itemId });
+    res.json({
+      ...item,
+      price: Number(item.price),
+      category_id: item.category_id || null,
+      category_name: item.category_name || "Uncategorized",
+      rating_avg: item.rating_avg || 0,
+      rating_count: item.rating_count || 0,
+    });
   } catch (err) {
-    next(err);
+    console.error("Error fetching single menu browse item:", err);
+    res.status(500).json({ error: "Failed to fetch item" });
   }
 });
 
