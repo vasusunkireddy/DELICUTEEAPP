@@ -8,7 +8,7 @@ const fs = require('fs');
 const cron = require('node-cron');
 const multer = require('multer');
 
-const pool = require('./db');
+const pool = require('./db'); // ✅ DB connection pool
 const { broadcastNotification } = require('./utils/push');
 
 const PORT = process.env.PORT || 3000;
@@ -37,8 +37,8 @@ const contactUsRoutes = require('./routes/contactus.routes');
 const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
-const categoriesRoutes = require('./routes/categories.routes');
-const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
+const categoriesRoutes = require('./routes/categories.routes'); 
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); 
 const waitlistRoutes = require("./routes/waitlist.routes");
 
 /* ─── Ensure uploads directories ─── */
@@ -47,30 +47,36 @@ const bannersDir = path.join(uploadsBase, 'banners');
 const avatarsDir = path.join(uploadsBase, 'avatars');
 const messagesDir = path.join(uploadsBase, 'messages');
 
-fs.mkdirSync(bannersDir, { recursive: true });
-fs.mkdirSync(avatarsDir, { recursive: true });
-fs.mkdirSync(messagesDir, { recursive: true });
+[bannersDir, avatarsDir, messagesDir].forEach(dir => {
+  fs.mkdirSync(dir, { recursive: true });
+});
 
-console.log('Serving avatars from:', avatarsDir);
-console.log('Serving message images from:', messagesDir);
+console.log('📂 Serving avatars from:', avatarsDir);
+console.log('📂 Serving message images from:', messagesDir);
 
-/* ─── Multer setup ─── */
+/* ─── Multer setup for chat/profile uploads ─── */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'avatar') return cb(null, avatarsDir);
     if (file.fieldname === 'image') return cb(null, messagesDir);
-    return cb(new Error('Invalid fieldname'), null);
+    return cb(new Error('Invalid fieldname'));
   },
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+  filename: (_req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     cb(null, `${file.fieldname}_${unique}${path.extname(file.originalname)}`);
   },
 });
-const fileFilter = (req, file, cb) => {
+
+const fileFilter = (_req, file, cb) => {
   const ok = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimetype);
   cb(ok ? null : new Error('Only JPEG, PNG, GIF, WebP are allowed'), ok);
 };
-const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 /* ─── Middleware ─── */
 app.use(cors());
@@ -78,22 +84,22 @@ app.use(express.json({ limit: '2mb' }));
 app.use(compression());
 app.use(morgan('dev'));
 
-/* ─── Static files ─── */
+/* ─── Static file serving ─── */
 app.use('/static/banners', express.static(bannersDir));
 app.use('/uploads/avatars', express.static(avatarsDir));
 app.use('/uploads/messages', express.static(messagesDir));
 app.use('/uploads', express.static(uploadsBase));
 
-/* ─── Upload endpoint ─── */
+/* ─── Upload endpoint for chat images ─── */
 app.post('/upload', upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const rel = `/uploads/messages/${req.file.filename}`;
     const abs = `${req.protocol}://${req.get('host')}${rel}`;
-    console.log('File uploaded:', rel);
+    console.log('📤 File uploaded:', rel);
     res.json({ url: abs, path: rel });
   } catch (e) {
-    console.error('Upload error:', e.message);
+    console.error('❌ Upload error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
@@ -101,7 +107,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
 /* ─── API Routes ─── */
 app.use('/api/auth', authRoutes);
 app.use('/api/menubrowse', browseRoutes);
-app.use('/api/browse', browseRoutes);
+app.use('/api/browse', browseRoutes); // alias
 app.use('/api/menu', menuRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/addresses', addressesRoutes);
@@ -126,42 +132,38 @@ app.use('/api/users', userRoutes);
 app.use('/api/zones', deliveryZonesRoutes);
 app.use("/api/waitlist", waitlistRoutes);
 
-/* ─── Redirect old menu endpoints ─── */
+/* ─── Redirect old /api/menu → /api/menubrowse ─── */
 app.get('/api/menu', (_req, res) => res.redirect(308, '/api/menubrowse'));
-app.get('/api/menu/:id', (req, res) =>
-  res.redirect(308, `/api/menubrowse/${req.params.id}`)
-);
+app.get('/api/menu/:id', (req, res) => res.redirect(308, `/api/menubrowse/${req.params.id}`));
 
 /* ─── Health check ─── */
 app.get('/', (_req, res) => res.send('✅ Delicute API running'));
 
 /* ─── 404 fallback ─── */
 app.use((req, res) => {
-  console.log(`404 Error: ${req.method} ${req.originalUrl}`);
+  console.log(`⚠️  404: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ message: '🚫 Endpoint not found' });
 });
 
 /* ─── Error handler ─── */
 app.use((err, _req, res, _next) => {
-  console.error('❌ Unhandled error:', err.stack || err);
-  res.status(500).json({ error: '🔥 Internal server error', message: err.message });
+  console.error('🔥 Unhandled error:', err.stack || err);
+  res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
-/* ─── Scheduled task (disable if PUSH_DISABLED=true) ─── */
-if (process.env.PUSH_DISABLED !== "true") {
-  cron.schedule('*/2 * * * *', async () => {
-    try {
-      const [due] = await pool.query(
-        `SELECT * FROM notifications WHERE sent = 0 AND sendAt <= NOW()`
-      );
-      for (const n of due) {
-        await broadcastNotification(n);
-      }
-    } catch (e) {
-      console.warn('cron push error', e.message);
+/* ─── Scheduled task ─── */
+cron.schedule('*/2 * * * *', async () => {
+  try {
+    const [due] = await pool.query(
+      `SELECT * FROM notifications WHERE sent = 0 AND sendAt <= NOW()`
+    );
+    for (const n of due) {
+      await broadcastNotification(n);
     }
-  });
-}
+  } catch (e) {
+    console.warn('⚠️ Cron push error:', e.message);
+  }
+});
 
 /* ─── Start server ─── */
 app.listen(PORT, () =>

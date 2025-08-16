@@ -3,17 +3,19 @@ const { Expo } = require('expo-server-sdk');
 const pool = require('../db');
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin SDK (only once)
+let fcmEnabled = false;
+
+// ─── Try initializing Firebase Admin (optional) ───
 if (!admin.apps.length) {
   try {
+    const serviceAccount = require('../firebase-service-account.json'); // ✅ correct relative path
     admin.initializeApp({
-      credential: admin.credential.cert(
-        require('../backend/firebase-service-account.json')
-      ),
+      credential: admin.credential.cert(serviceAccount),
     });
+    fcmEnabled = true;
     console.log("✅ Firebase Admin initialized");
   } catch (e) {
-    console.log("⚠️ Firebase Admin init failed:", e.message);
+    console.log("⚠️ Firebase Admin not initialized (missing service account). FCM disabled.");
   }
 }
 
@@ -50,6 +52,11 @@ async function sendExpoPush(tokens, title, body, data = {}) {
  * Send push via Firebase Cloud Messaging
  */
 async function sendFCMPush(tokens, title, body, data = {}) {
+  if (!fcmEnabled) {
+    console.log("ℹ️ Skipping FCM push (Firebase not initialized)");
+    return;
+  }
+
   try {
     if (!tokens.length) {
       console.log("ℹ️ No valid FCM tokens");
@@ -97,7 +104,7 @@ async function broadcastNotification(n) {
       }
     } catch (dbErr) {
       console.log("⚠️ Failed to fetch tokens:", dbErr.message);
-      return; // stop if we can't even fetch tokens
+      return;
     }
 
     const expoTokens = tokenRows.map((r) => r.expo_token).filter(Boolean);
