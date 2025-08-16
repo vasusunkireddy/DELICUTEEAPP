@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../db');
-const { sendOrderStatusEmail } = require('../../utils/mailer');
+const { sendOrderStatusEmail } = require('../utils/mailer'); // ✅ fixed path
 
 const router = express.Router();
 
@@ -102,7 +102,7 @@ router.patch('/admin/:id/status', async (req, res) => {
         name: order.customerName,
         orderId: order.id,
         status: order.status,
-        reason: reason || '',
+        reason: order.cancel_reason || '',
       })
         .then(() => console.log(`📧 status mail sent → ${order.email}`))
         .catch((e) => console.warn('email failed:', e.message));

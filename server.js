@@ -37,8 +37,8 @@ const contactUsRoutes = require('./routes/contactus.routes');
 const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
-const categoriesRoutes = require('./routes/categories.routes'); 
-const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); // ✅ NEW
+const categoriesRoutes = require('./routes/categories.routes');
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
 const waitlistRoutes = require("./routes/waitlist.routes");
 
 /* ─── Ensure uploads directories ─── */
@@ -54,7 +54,7 @@ fs.mkdirSync(messagesDir, { recursive: true });
 console.log('Serving avatars from:', avatarsDir);
 console.log('Serving message images from:', messagesDir);
 
-/* ─── Multer setup for chat/profile uploads ─── */
+/* ─── Multer setup ─── */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'avatar') return cb(null, avatarsDir);
@@ -78,13 +78,13 @@ app.use(express.json({ limit: '2mb' }));
 app.use(compression());
 app.use(morgan('dev'));
 
-/* ─── Static file serving ─── */
+/* ─── Static files ─── */
 app.use('/static/banners', express.static(bannersDir));
 app.use('/uploads/avatars', express.static(avatarsDir));
 app.use('/uploads/messages', express.static(messagesDir));
 app.use('/uploads', express.static(uploadsBase));
 
-/* ─── Upload endpoint for chat images ─── */
+/* ─── Upload endpoint ─── */
 app.post('/upload', upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -101,7 +101,7 @@ app.post('/upload', upload.single('image'), (req, res) => {
 /* ─── API Routes ─── */
 app.use('/api/auth', authRoutes);
 app.use('/api/menubrowse', browseRoutes);
-app.use('/api/browse', browseRoutes); // alias
+app.use('/api/browse', browseRoutes);
 app.use('/api/menu', menuRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/addresses', addressesRoutes);
@@ -123,12 +123,14 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/contactus', contactUsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/zones', deliveryZonesRoutes); // ✅ NEW
+app.use('/api/zones', deliveryZonesRoutes);
 app.use("/api/waitlist", waitlistRoutes);
 
-/* ─── Redirect old /api/menu → /api/menubrowse ─── */
+/* ─── Redirect old menu endpoints ─── */
 app.get('/api/menu', (_req, res) => res.redirect(308, '/api/menubrowse'));
-app.get('/api/menu/:id', (req, res) => res.redirect(308, `/api/menubrowse/${req.params.id}`));
+app.get('/api/menu/:id', (req, res) =>
+  res.redirect(308, `/api/menubrowse/${req.params.id}`)
+);
 
 /* ─── Health check ─── */
 app.get('/', (_req, res) => res.send('✅ Delicute API running'));
@@ -145,19 +147,21 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: '🔥 Internal server error', message: err.message });
 });
 
-/* ─── Scheduled task ─── */
-cron.schedule('*/2 * * * *', async () => {
-  try {
-    const [due] = await pool.query(
-      `SELECT * FROM notifications WHERE sent = 0 AND sendAt <= NOW()`
-    );
-    for (const n of due) {
-      await broadcastNotification(n);
+/* ─── Scheduled task (disable if PUSH_DISABLED=true) ─── */
+if (process.env.PUSH_DISABLED !== "true") {
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      const [due] = await pool.query(
+        `SELECT * FROM notifications WHERE sent = 0 AND sendAt <= NOW()`
+      );
+      for (const n of due) {
+        await broadcastNotification(n);
+      }
+    } catch (e) {
+      console.warn('cron push error', e.message);
     }
-  } catch (e) {
-    console.warn('cron push error', e.message);
-  }
-});
+  });
+}
 
 /* ─── Start server ─── */
 app.listen(PORT, () =>
