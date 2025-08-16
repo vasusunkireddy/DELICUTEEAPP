@@ -1,6 +1,6 @@
 // utils/push.js
 const { Expo } = require('expo-server-sdk');
-const pool = require('../backend/db');
+const pool = require('../db');
 const admin = require('firebase-admin');
 
 // Initialize Firebase Admin SDK (only once)
