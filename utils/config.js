@@ -1,10 +1,9 @@
 // utils/config.js
 export const SERVERS = {
-  // ⬇️ put YOUR laptop's IPv4 here (ipconfig)
-  local: 'http://192.168.1.103:3000',
-  render: 'https://delicuteeapp.onrender.com',
+  local: 'http://192.168.1.103:3000',                 // your Wi-Fi server (if you ever test locally)
+  render: 'https://delicuteeapp.onrender.com',        // 24/7 Render
 };
 
-// true  => always use Render
-// false => use localhost (SERVERS.local)
-export const IS_PRODUCTION = false;
+// 👉 For customer / real APK
+export const IS_PRODUCTION = true;         // true = always use Render
+export const DEFAULT_SERVER = 'render';    // default if not overridden when IS_PRODUCTION = false

@@ -8,53 +8,30 @@ const fs = require('fs');
 const cron = require('node-cron');
 const multer = require('multer');
 
-const pool = require('./db'); // ✅ DB connection pool
+const pool = require('./db');
 const { broadcastNotification } = require('./utils/push');
+const authenticate = require('./middleware/authenticate'); // ✅ add this
 
 const PORT = process.env.PORT || 3000;
 const app = express();
 
-/* ─── Route imports ─── */
-const authRoutes = require('./routes/auth.routes');
-const menuRoutes = require('./routes/menu.routes');
-const ordersRoutes = require('./routes/order.routes');
-const myOrdersRoutes = require('./routes/myorders.routes');
-const cartRoutes = require('./routes/cart.routes');
-const browseRoutes = require('./routes/menubrowse.routes');
-const addressesRoutes = require('./routes/addresses.routes');
-const profileRoutes = require('./routes/profile.route');
-const paymentsRoutes = require('./routes/payments.routes');
-const customersRoutes = require('./routes/customers.routes');
-const bannersRoutes = require('./routes/banners.routes');
-const notificationsRoutes = require('./routes/notifications.routes');
-const ticketsRoutes = require('./routes/tickets.routes');
-const settingsRoutes = require('./routes/settings.routes');
-const feedbackRoutes = require('./routes/feedback.routes');
-const analyticsRoutes = require('./routes/analytics.routes');
-const couponsRoutes = require('./routes/coupons.routes');
-const availableCouponRoutes = require('./routes/availablecoupon.routes');
-const contactUsRoutes = require('./routes/contactus.routes');
-const customerOrdersRoutes = require('./routes/customerorders.routes');
-const favoritesRoutes = require('./routes/favorites.routes');
-const userRoutes = require('./routes/user.routes');
-const categoriesRoutes = require('./routes/categories.routes');  // ✅ CATEGORIES
-const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
-const waitlistRoutes = require("./routes/waitlist.routes");
+const IS_PROD = process.env.NODE_ENV === 'production' || !!process.env.RENDER;
 
-/* ─── Ensure uploads directories ─── */
-const uploadsBase = path.join(__dirname, 'uploads');
+// ───────────────── Upload dirs: use /tmp on Render ─────────────────
+const uploadsBase = IS_PROD ? '/tmp/uploads' : path.join(__dirname, 'uploads');
 const bannersDir = path.join(uploadsBase, 'banners');
 const avatarsDir = path.join(uploadsBase, 'avatars');
 const messagesDir = path.join(uploadsBase, 'messages');
 
-[bannersDir, avatarsDir, messagesDir].forEach(dir => {
-  fs.mkdirSync(dir, { recursive: true });
+[bannersDir, avatarsDir, messagesDir].forEach((dir) => {
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
 });
 
-console.log('📂 Serving avatars from:', avatarsDir);
-console.log('📂 Serving message images from:', messagesDir);
+console.log('📂 uploadsBase:', uploadsBase);
+console.log('📂 avatarsDir:', avatarsDir);
+console.log('📂 messagesDir:', messagesDir);
 
-/* ─── Multer setup for chat/profile uploads ─── */
+// ───────────────── Multer (local disk only; use Cloudinary in routes if you want) ─────────────────
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'avatar') return cb(null, avatarsDir);
@@ -66,31 +43,26 @@ const storage = multer.diskStorage({
     cb(null, `${file.fieldname}_${unique}${path.extname(file.originalname)}`);
   },
 });
-
 const fileFilter = (_req, file, cb) => {
   const ok = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimetype);
   cb(ok ? null : new Error('Only JPEG, PNG, GIF, WebP are allowed'), ok);
 };
+const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
 
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 },
-});
-
-/* ─── Middleware ─── */
-app.use(cors());
+// ───────────────── Core middleware ─────────────────
+app.use(cors({ origin: '*'})); // tighten later if needed
 app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true }));
 app.use(compression());
 app.use(morgan('dev'));
 
-/* ─── Static file serving ─── */
+// ───────────────── Static ─────────────────
 app.use('/static/banners', express.static(bannersDir));
 app.use('/uploads/avatars', express.static(avatarsDir));
 app.use('/uploads/messages', express.static(messagesDir));
 app.use('/uploads', express.static(uploadsBase));
 
-/* ─── Upload endpoint for chat images ─── */
+// ───────────────── Simple upload endpoint (local disk). For prod, prefer Cloudinary in a route. ─────────────────
 app.post('/upload', upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -104,54 +76,83 @@ app.post('/upload', upload.single('image'), (req, res) => {
   }
 });
 
-/* ─── API Routes ─── */
-app.use('/api/auth', authRoutes);
-app.use('/api/menubrowse', browseRoutes);
-app.use('/api/browse', browseRoutes); // alias
-app.use('/api/menu', menuRoutes);
-app.use('/api/categories', categoriesRoutes);   // ✅ Categories route active
-app.use('/api/addresses', addressesRoutes);
-app.use('/api/profile', profileRoutes);
-app.use('/api/cart', cartRoutes);
-app.use('/api/orders', ordersRoutes);
-app.use('/api/myorders', myOrdersRoutes);
-app.use('/api/customer-orders', customerOrdersRoutes);
-app.use('/api/payments', paymentsRoutes);
-app.use('/api/coupons', couponsRoutes);
-app.use('/api/available-coupons', availableCouponRoutes);
-app.use('/api/customers', customersRoutes);
-app.use('/api/banners', bannersRoutes);
-app.use('/api/notifications', notificationsRoutes);
-app.use('/api/tickets', ticketsRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/feedback', feedbackRoutes);
-app.use('/api/analytics', analyticsRoutes);
-app.use('/api/contactus', contactUsRoutes);
-app.use('/api/favorites', favoritesRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/zones', deliveryZonesRoutes);
-app.use("/api/waitlist", waitlistRoutes);
+// ───────────────── Routes (PUBLIC first) ─────────────────
+const authRoutes = require('./routes/auth.routes');
+const browseRoutes = require('./routes/menubrowse.routes');
+const categoriesRoutes = require('./routes/categories.routes');
+const bannersRoutes = require('./routes/banners.routes');
 
-/* ─── Redirect old /api/menu → /api/menubrowse ─── */
+// ⚠️ remove /api/menu router because we redirect old paths to menubrowse
+// const menuRoutes = require('./routes/menu.routes');
+
+app.use('/api/auth', authRoutes);                   // PUBLIC
+app.use('/api/menubrowse', browseRoutes);           // PUBLIC
+app.use('/api/browse', browseRoutes);               // alias, PUBLIC
+app.use('/api/categories', categoriesRoutes);       // PUBLIC reads; protect writes INSIDE the file
+app.use('/api/banners', bannersRoutes);             // PUBLIC reads; protect writes INSIDE the file
+
+// Legacy redirects for /api/menu → /api/menubrowse (must come BEFORE any /api/menu mount)
 app.get('/api/menu', (_req, res) => res.redirect(308, '/api/menubrowse'));
 app.get('/api/menu/:id', (req, res) => res.redirect(308, `/api/menubrowse/${req.params.id}`));
 
-/* ─── Health check ─── */
+// ───────────────── Protected routes ─────────────────
+const ordersRoutes = require('./routes/order.routes');
+const myOrdersRoutes = require('./routes/myorders.routes');
+const cartRoutes = require('./routes/cart.routes');
+const addressesRoutes = require('./routes/addresses.routes');
+const profileRoutes = require('./routes/profile.route');
+const paymentsRoutes = require('./routes/payments.routes');
+const customersRoutes = require('./routes/customers.routes');
+const notificationsRoutes = require('./routes/notifications.routes');
+const ticketsRoutes = require('./routes/tickets.routes');
+const settingsRoutes = require('./routes/settings.routes');
+const feedbackRoutes = require('./routes/feedback.routes');
+const analyticsRoutes = require('./routes/analytics.routes');
+const couponsRoutes = require('./routes/coupons.routes');
+const availableCouponRoutes = require('./routes/availablecoupon.routes');
+const contactUsRoutes = require('./routes/contactus.routes');
+const customerOrdersRoutes = require('./routes/customerorders.routes');
+const favoritesRoutes = require('./routes/favorites.routes');
+const userRoutes = require('./routes/user.routes');
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
+const waitlistRoutes = require('./routes/waitlist.routes');
+
+app.use('/api/profile', authenticate, profileRoutes);
+app.use('/api/cart', authenticate, cartRoutes);
+app.use('/api/orders', authenticate, ordersRoutes);
+app.use('/api/myorders', authenticate, myOrdersRoutes);
+app.use('/api/customer-orders', authenticate, customerOrdersRoutes);
+app.use('/api/payments', authenticate, paymentsRoutes);
+app.use('/api/coupons', authenticate, couponsRoutes);
+app.use('/api/available-coupons', authenticate, availableCouponRoutes);
+app.use('/api/customers', authenticate, customersRoutes);
+app.use('/api/notifications', authenticate, notificationsRoutes);
+app.use('/api/tickets', authenticate, ticketsRoutes);
+app.use('/api/settings', authenticate, settingsRoutes);
+app.use('/api/feedback', authenticate, feedbackRoutes);
+app.use('/api/analytics', authenticate, analyticsRoutes);
+app.use('/api/contactus', authenticate, contactUsRoutes);
+app.use('/api/favorites', authenticate, favoritesRoutes);
+app.use('/api/users', authenticate, userRoutes);
+app.use('/api/zones', authenticate, deliveryZonesRoutes);
+app.use('/api/waitlist', authenticate, waitlistRoutes);
+
+// ───────────────── Health ─────────────────
 app.get('/', (_req, res) => res.send('✅ Delicute API running'));
 
-/* ─── 404 fallback ─── */
+// ───────────────── 404 ─────────────────
 app.use((req, res) => {
   console.log(`⚠️  404: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ message: '🚫 Endpoint not found' });
 });
 
-/* ─── Error handler ─── */
+// ───────────────── Error handler ─────────────────
 app.use((err, _req, res, _next) => {
   console.error('🔥 Unhandled error:', err.stack || err);
-  res.status(500).json({ error: 'Internal server error', message: err.message });
+  res.status(err.status || 500).json({ message: err.message || 'Internal server error' });
 });
 
-/* ─── Scheduled task ─── */
+// ───────────────── Cron (safe) ─────────────────
 cron.schedule('*/2 * * * *', async () => {
   try {
     const [due] = await pool.query(
@@ -165,7 +166,7 @@ cron.schedule('*/2 * * * *', async () => {
   }
 });
 
-/* ─── Start server ─── */
-app.listen(PORT, () =>
-  console.log(`🚀 Delicute API running at http://localhost:${PORT}`)
-);
+// ───────────────── Start ─────────────────
+app.listen(PORT, () => {
+  console.log(`🚀 Delicute API running at http://localhost:${PORT}`);
+});
