@@ -1,4 +1,3 @@
-// routes/menubrowse.routes.js
 const express = require("express");
 const pool = require("../db");
 
@@ -28,17 +27,20 @@ router.get("/", async (_req, res) => {
       ORDER BY m.id DESC
     `);
 
-    res.json(rows.map(row => ({
+    const menuItems = rows.map(row => ({
       ...row,
       price: Number(row.price),
       category_id: row.category_id || null,
       category_name: row.category_name || "Uncategorized",
       rating_avg: row.rating_avg || 0,
       rating_count: row.rating_count || 0,
-    })));
+    }));
+
+    console.log('Processed menu items:', menuItems);
+    res.json({ data: menuItems }); // Wrap in { data: [...] }
   } catch (err) {
     console.error("Error fetching menu browse:", err);
-    res.status(500).json({ error: "Failed to fetch menu items" });
+    res.status(500).json({ data: [], error: "Failed to fetch menu items", details: err.message });
   }
 });
 
@@ -92,10 +94,10 @@ router.get("/grouped", async (_req, res) => {
         })),
     }));
 
-    res.json(grouped);
+    res.json({ data: grouped }); // Wrap in { data: [...] } for consistency
   } catch (err) {
     console.error("Error fetching grouped menu browse:", err);
-    res.status(500).json({ error: "Failed to fetch grouped menu" });
+    res.status(500).json({ data: [], error: "Failed to fetch grouped menu", details: err.message });
   }
 });
 
@@ -122,19 +124,21 @@ router.get("/:id", async (req, res) => {
       GROUP BY m.id, c.name
     `, [req.params.id]);
 
-    if (!item) return res.status(404).json({ error: "Item not found" });
+    if (!item) return res.status(404).json({ data: null, error: "Item not found" });
 
     res.json({
-      ...item,
-      price: Number(item.price),
-      category_id: item.category_id || null,
-      category_name: item.category_name || "Uncategorized",
-      rating_avg: item.rating_avg || 0,
-      rating_count: item.rating_count || 0,
+      data: {
+        ...item,
+        price: Number(item.price),
+        category_id: item.category_id || null,
+        category_name: item.category_name || "Uncategorized",
+        rating_avg: item.rating_avg || 0,
+        rating_count: item.rating_count || 0,
+      }
     });
   } catch (err) {
     console.error("Error fetching single menu browse item:", err);
-    res.status(500).json({ error: "Failed to fetch item" });
+    res.status(500).json({ data: null, error: "Failed to fetch item", details: err.message });
   }
 });
 

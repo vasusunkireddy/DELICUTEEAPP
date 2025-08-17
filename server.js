@@ -37,8 +37,8 @@ const contactUsRoutes = require('./routes/contactus.routes');
 const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
-const categoriesRoutes = require('./routes/categories.routes'); 
-const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); 
+const categoriesRoutes = require('./routes/categories.routes');  // ✅ CATEGORIES
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
 const waitlistRoutes = require("./routes/waitlist.routes");
 
 /* ─── Ensure uploads directories ─── */
@@ -109,7 +109,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/menubrowse', browseRoutes);
 app.use('/api/browse', browseRoutes); // alias
 app.use('/api/menu', menuRoutes);
-app.use('/api/categories', categoriesRoutes);
+app.use('/api/categories', categoriesRoutes);   // ✅ Categories route active
 app.use('/api/addresses', addressesRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/cart', cartRoutes);
