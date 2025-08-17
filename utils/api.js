@@ -1,34 +1,31 @@
 // utils/api.js
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { SERVERS, IS_PRODUCTION } from './config';
 
-const BASE_URL = 'http://10.1.81.104:3000'; // or your actual backend port
-
+// single source of truth
+const BASE_URL = IS_PRODUCTION ? SERVERS.render : SERVERS.local;
 
 const api = axios.create({
   baseURL: `${BASE_URL}/api`,
-  timeout: 8000,
+  timeout: 10000,
 });
 
 api.interceptors.request.use(
   async (config) => {
     const token = await AsyncStorage.getItem('token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    console.log(`Request to: ${config.url}, Headers:`, config.headers);
+    if (token) config.headers.Authorization = `Bearer ${token}`;
+    // quick visibility
+    console.log(`API → ${config.method?.toUpperCase()} ${api.defaults.baseURL}${config.url}`);
     return config;
   },
-  (error) => {
-    console.error('Request interceptor error:', error);
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 api.interceptors.response.use(
-  (response) => response,
+  (res) => res,
   (error) => {
-    console.error('Response error:', error.response?.status, error.response?.data);
+    console.error('API ERROR', error.response?.status, error.response?.data || error.message);
     return Promise.reject(error);
   }
 );
