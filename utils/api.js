@@ -2,8 +2,11 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://10.1.81.104:3000'; // or your actual backend port
+const PORT = 3000;
+// 👉 your Windows Wi-Fi IPv4
+const LOCAL_LAN_IP = '192.168.1.103';
 
+const BASE_URL = `http://${LOCAL_LAN_IP}:${PORT}`;
 
 const api = axios.create({
   baseURL: `${BASE_URL}/api`,
@@ -16,19 +19,16 @@ api.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    console.log(`Request to: ${config.url}, Headers:`, config.headers);
+    console.log(`➡️ ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`, config.headers);
     return config;
   },
-  (error) => {
-    console.error('Request interceptor error:', error);
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    console.error('Response error:', error.response?.status, error.response?.data);
+    console.error('❌ API Error:', error.response?.status, error.response?.data);
     return Promise.reject(error);
   }
 );
