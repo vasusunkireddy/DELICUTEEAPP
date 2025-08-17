@@ -1,17 +1,36 @@
 // utils/api.js
 import axios from 'axios';
+import { Platform, NativeModules } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// ─── Always use production Render API ───
-const BASE_URL = 'https://delicuteeapp.onrender.com/api';
+/* ─── Production API (Render) ─── */
+const PROD_BASE = 'https://delicuteeapp.onrender.com/api';
 
-// ─── Axios instance ───
+/* ─── Local Dev API ─── */
+const API_PORT = 3000;
+const scriptURL = NativeModules?.SourceCode?.scriptURL ?? '';
+const hostMatch = scriptURL.match(/\/\/([^:/?#]+)(?::\d+)?/);
+let localHost = hostMatch?.[1] || '192.168.1.103'; // fallback Wi-Fi IP
+
+// Special case for Android emulator
+if (
+  Platform.OS === 'android' &&
+  (localHost === 'localhost' || localHost === '127.0.0.1')
+) {
+  localHost = '10.0.2.2';
+}
+const LOCAL_BASE = `http://${localHost}:${API_PORT}/api`;
+
+/* ─── Pick base URL ─── */
+const BASE_URL = __DEV__ ? LOCAL_BASE : PROD_BASE;
+
+/* ─── Axios instance ─── */
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 15000, // longer timeout for Render cold starts
+  timeout: 15000,
 });
 
-// ─── Attach token if available ───
+/* ─── Attach token ─── */
 api.interceptors.request.use(async (config) => {
   const token = await AsyncStorage.getItem('token');
   if (token) {
@@ -20,7 +39,7 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// ─── Log errors cleanly ───
+/* ─── Error logging ─── */
 api.interceptors.response.use(
   (res) => res,
   (err) => {
