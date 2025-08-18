@@ -62,8 +62,9 @@ async function upsertOtp(email, otp, expiry) {
     );
     return user.id;
   }
+  // handle schemas where password_hash is NOT NULL by setting placeholder
   const [res] = await pool.query(
-    "INSERT INTO users (email, role, otp_code, otp_expiry) VALUES (?, 'customer', ?, ?)",
+    "INSERT INTO users (full_name, email, phone, password_hash, role, otp_code, otp_expiry) VALUES (NULL, ?, NULL, 'otp_placeholder', 'customer', ?, ?)",
     [email, otp, expiry]
   );
   return res.insertId;
@@ -156,17 +157,19 @@ router.post("/verify-otp", async (req, res) => {
 
     await pool.query("UPDATE users SET otp_code = NULL, otp_expiry = NULL WHERE id = ?", [user.id]);
 
-    const token = generateToken(user);
+    const fresh = await getUserById(user.id); // reflect cleared otp fields
+    const token = generateToken(fresh);
     return res.json({
       message: "OTP verified",
       token,
       user: {
-        id: user.id,
-        role: user.role,
-        fullName: user.full_name,
-        email: user.email,
-        phone: user.phone,
+        id: fresh.id,
+        role: fresh.role,
+        fullName: fresh.full_name,
+        email: fresh.email,
+        phone: fresh.phone,
       },
+      needsPhone: !fresh.phone, // 👈 tell client whether to show phone screen
     });
   } catch (err) {
     console.error("❌ Verify OTP Error:", err);
@@ -174,7 +177,7 @@ router.post("/verify-otp", async (req, res) => {
   }
 });
 
-// ───────────── 3) Save Phone After OTP (LOCK ONCE SET) ─────────────
+// ───────────── 3) Save Phone After OTP (IDEMPOTENT + LOCK ONCE SET) ─────────────
 router.post("/save-phone", async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
@@ -191,11 +194,30 @@ router.post("/save-phone", async (req, res) => {
     const user = await getUserByEmail(email);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // 1) Cannot change once set
-    const lock = await assertPhoneNotLocked(user.id, rawPhone);
-    if (!lock.ok) return res.status(lock.code).json({ message: lock.msg });
+    const current = (user.phone || "").trim();
 
-    // 2) Phone must be unique globally
+    // ✅ If same number submitted again, return success (idempotent)
+    if (current && current === rawPhone) {
+      const token = generateToken(user);
+      return res.json({
+        message: "Phone already saved",
+        token,
+        user: {
+          id: user.id,
+          role: user.role,
+          fullName: user.full_name,
+          email: user.email,
+          phone: user.phone,
+        },
+      });
+    }
+
+    // 🔒 If different number and already set → block (locked)
+    if (current && current !== rawPhone) {
+      return res.status(409).json({ message: "Phone already set and locked for this account" });
+    }
+
+    // 🔐 Phone must be globally unique
     const uniq = await assertPhoneAvailableForUser(user.id, rawPhone);
     if (!uniq.ok) return res.status(uniq.code).json({ message: uniq.msg });
 
@@ -247,11 +269,11 @@ router.put("/users/:id/phone", verifyToken, async (req, res) => {
     const user = await getUserById(id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // 1) Cannot change once set (even admin; create a separate admin-only override route if needed)
+    // 🔒 Cannot change once set (even admin here). Build a separate override if you need.
     const lock = await assertPhoneNotLocked(id, rawPhone);
     if (!lock.ok) return res.status(lock.code).json({ message: lock.msg });
 
-    // 2) Phone must be unique globally
+    // 🔐 Unique globally
     const uniq = await assertPhoneAvailableForUser(id, rawPhone);
     if (!uniq.ok) return res.status(uniq.code).json({ message: uniq.msg });
 
@@ -289,9 +311,10 @@ router.post("/google-login", async (req, res) => {
 
     let user = await getUserByEmail(email);
     if (!user) {
+      // handle schemas where password_hash is NOT NULL by setting placeholder
       const [ins] = await pool.query(
-        "INSERT INTO users (email, full_name, role) VALUES (?, ?, 'customer')",
-        [email, fullName]
+        "INSERT INTO users (full_name, email, phone, password_hash, role) VALUES (?, ?, NULL, 'otp_placeholder', 'customer')",
+        [fullName, email]
       );
       const [rows] = await pool.query("SELECT * FROM users WHERE id = ?", [ins.insertId]);
       user = rows?.[0];
@@ -308,6 +331,7 @@ router.post("/google-login", async (req, res) => {
         email: user.email,
         phone: user.phone,
       },
+      needsPhone: !user.phone, // keep client flow consistent here too
     });
   } catch (err) {
     console.error("❌ Google Login Error:", err);
