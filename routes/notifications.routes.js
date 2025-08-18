@@ -1,4 +1,3 @@
-// routes/notifications.js
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
@@ -7,13 +6,13 @@ const admin = require('firebase-admin');
 
 // Firebase Admin SDK initialization
 if (!admin.apps.length) {
-  const serviceAccount = require('../firebase-service-account.json'); // <-- Your downloaded Firebase service account key
+  const serviceAccount = require('../firebase-service-account.json');
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'; // Ensure this matches the frontend's JWT_SECRET
 
 /** JWT middleware */
 const verifyToken = (req, res, next) => {
@@ -29,15 +28,12 @@ const verifyToken = (req, res, next) => {
 };
 
 /** Validate incoming notification */
-const validateNotification = ({ title, body, sendAt, target, image }) => {
-  if (!title?.trim() || !body?.trim() || !sendAt) {
-    return 'Title, body, and sendAt are required';
+const validateNotification = ({ title, message, createdAt, imageUrl }) => {
+  if (!title?.trim() || !message?.trim()) {
+    return 'Title and message are required';
   }
-  if (!['ALL', 'FIRST_ORDER', 'VIP'].includes(target)) {
-    return 'Invalid target value';
-  }
-  if (image && !/^(https?:\/\/|file:\/\/|content:\/\/)/.test(image)) {
-    return 'Invalid image path';
+  if (imageUrl && !/^(https?:\/\/|file:\/\/|content:\/\/)/.test(imageUrl)) {
+    return 'Invalid image URL';
   }
   return null;
 };
@@ -76,55 +72,35 @@ router.post('/users/push-token', async (req, res, next) => {
 /** Create & instantly send notification */
 router.post('/', async (req, res, next) => {
   try {
-    const { title, body, target = 'ALL', sendAt, image = null } = req.body;
-    const error = validateNotification({ title, body, sendAt, target, image });
+    const { title, message, imageUrl = null, createdAt = new Date().toISOString() } = req.body;
+    const error = validateNotification({ title, message, createdAt, imageUrl });
     if (error) return res.status(400).json({ message: error });
 
     // Save to DB
     const [result] = await pool.query(
-      'INSERT INTO notifications (title, body, target, sendAt, image, sent) VALUES (?, ?, ?, ?, ?, 0)',
-      [title.trim(), body.trim(), target, sendAt, image]
+      'INSERT INTO notifications (title, message, imageUrl, createdAt, sent) VALUES (?, ?, ?, ?, 0)',
+      [title.trim(), message.trim(), imageUrl, createdAt]
     );
 
-    // Get tokens based on target
-    let tokenRows = [];
-    if (target === 'ALL') {
-      [tokenRows] = await pool.query('SELECT fcm_token FROM push_tokens');
-    } else if (target === 'FIRST_ORDER') {
-      [tokenRows] = await pool.query(`
-        SELECT pt.fcm_token
-        FROM push_tokens pt
-        JOIN orders o ON o.user_id = pt.user_id
-        GROUP BY pt.user_id
-        HAVING COUNT(o.id) = 1
-      `);
-    } else if (target === 'VIP') {
-      [tokenRows] = await pool.query(`
-        SELECT pt.fcm_token
-        FROM push_tokens pt
-        JOIN orders o ON o.user_id = pt.user_id
-        GROUP BY pt.user_id
-        HAVING COUNT(o.id) >= 5
-      `);
-    }
-
+    // Get all push tokens (default to ALL users)
+    const [tokenRows] = await pool.query('SELECT fcm_token FROM push_tokens');
     const tokens = tokenRows.map(r => r.fcm_token).filter(Boolean);
 
     if (tokens.length > 0) {
-      const message = {
+      const notification = {
         notification: {
           title: title.trim(),
-          body: body.trim(),
+          body: message.trim(),
         },
         android: {
           notification: {
-            imageUrl: image || undefined,
+            imageUrl: imageUrl || undefined,
           },
         },
         tokens, // Send to multiple devices
       };
 
-      const response = await admin.messaging().sendMulticast(message);
+      const response = await admin.messaging().sendMulticast(notification);
 
       console.log(`✅ Sent to ${response.successCount} devices, failed: ${response.failureCount}`);
 
@@ -161,7 +137,7 @@ router.delete('/:id', async (req, res, next) => {
 /** Error handler */
 router.use((err, req, res, _next) => {
   console.error(err);
-  res.status(500).json({ message: err.message });
+  res.status(500).json({ message: 'Failed to process request' });
 });
 
 module.exports = router;
