@@ -1,4 +1,3 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -31,7 +30,7 @@ const profileRoutes = require('./routes/profile.route');
 const paymentsRoutes = require('./routes/payments.routes');
 const customersRoutes = require('./routes/customers.routes');
 const bannersRoutes = require('./routes/banners.routes');
-const notificationsRoutes = require('./routes/notifications.routes'); // ⬅️ will mount under /api/notifications
+const notificationsRoutes = require('./routes/notifications.routes'); // ✅ corrected below
 const ticketsRoutes = require('./routes/tickets.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const feedbackRoutes = require('./routes/feedback.routes');
@@ -123,8 +122,8 @@ app.post('/upload', upload.single('image'), (req, res) => {
 
 /* ─── API Routes ─── */
 /* PUBLIC-FIRST: put zones + waitlist before anything that could intercept */
-app.use('/api/zones', deliveryZonesRoutes);       // ⬅️ includes POST /check (public)
-app.use('/api/waitlist', waitlistRoutes);         // ⬅️ public
+app.use('/api/zones', deliveryZonesRoutes);       
+app.use('/api/waitlist', waitlistRoutes);         
 
 /* General public + auth-mixed routes */
 app.use('/api/auth', authRoutes);
@@ -150,8 +149,8 @@ app.use('/api/contactus', contactUsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/users', userRoutes);
 
-/* ✅ Correct: mount notifications ONLY under its own namespace */
-app.use('/api/notifications', notificationsRoutes);
+/* ✅ FIXED: mount notifications at /api (not /api/notifications) */
+app.use('/api', notificationsRoutes);
 
 /* Admin menu CRUD under /api/menu-admin */
 app.use('/api/menu-admin', menuRoutes);
