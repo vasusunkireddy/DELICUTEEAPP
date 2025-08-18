@@ -21,7 +21,7 @@ app.set('trust proxy', 1);
 
 /* ─── Route imports ─── */
 const authRoutes = require('./routes/auth.routes');
-const menuRoutes = require('./routes/menu.routes'); // admin CRUD for menu
+const menuRoutes = require('./routes/menu.routes');              // admin CRUD for menu
 const ordersRoutes = require('./routes/order.routes');
 const myOrdersRoutes = require('./routes/myorders.routes');
 const cartRoutes = require('./routes/cart.routes');
@@ -31,7 +31,7 @@ const profileRoutes = require('./routes/profile.route');
 const paymentsRoutes = require('./routes/payments.routes');
 const customersRoutes = require('./routes/customers.routes');
 const bannersRoutes = require('./routes/banners.routes');
-const notificationsRoutes = require('./routes/notifications.routes');
+const notificationsRoutes = require('./routes/notifications.routes'); // ⬅️ will mount under /api/notifications
 const ticketsRoutes = require('./routes/tickets.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const feedbackRoutes = require('./routes/feedback.routes');
@@ -43,15 +43,14 @@ const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
 const categoriesRoutes = require('./routes/categories.routes');
-const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); // ⬅️ has POST /check
 const waitlistRoutes = require('./routes/waitlist.routes');
 
-/* ─── Ensure uploads directories (lowercase) ─── */
-const uploadsBase = path.join(__dirname, 'uploads'); // ⚠️ keep lowercase to match static paths
+/* ─── Ensure uploads directories ─── */
+const uploadsBase = path.join(__dirname, 'uploads');
 const bannersDir = path.join(uploadsBase, 'banners');
 const avatarsDir = path.join(uploadsBase, 'avatars');
 const messagesDir = path.join(uploadsBase, 'messages');
-
 [bannersDir, avatarsDir, messagesDir].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
 
 console.log('📂 Serving banners from:', bannersDir);
@@ -77,14 +76,9 @@ const fileFilter = (_req, file, cb) => {
 const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
 
 /* ─── CORS ─── */
-const PROD_ORIGIN = 'https://delicuteeapp.onrender.com';
+const PROD_ORIGIN = 'https://delicuteeapp.onrender.com'; // verify this is your real host
 const corsOptions = {
   origin: (origin, cb) => {
-    // Allow:
-    // - no origin (mobile apps)
-    // - your Render origin
-    // - localhost dev ports
-    // - local LAN IPs (for testing in Wi-Fi)
     const allowed =
       !origin ||
       origin === PROD_ORIGIN ||
@@ -103,7 +97,7 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(morgan('dev'));
 
-/* ─── Health / Warmup ─── */
+/* ─── Health ─── */
 app.get('/', (_req, res) => res.status(200).json({ ok: true, service: 'delicute' }));
 app.get('/api', (_req, res) => res.status(200).json({ ok: true, api: 'v1' }));
 
@@ -113,7 +107,7 @@ app.use('/uploads/avatars', express.static(avatarsDir));
 app.use('/uploads/messages', express.static(messagesDir));
 app.use('/uploads', express.static(uploadsBase));
 
-/* ─── Public upload endpoint (chat images) ─── */
+/* ─── Public chat upload endpoint ─── */
 app.post('/upload', upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -127,10 +121,15 @@ app.post('/upload', upload.single('image'), (req, res) => {
   }
 });
 
-/* ─── API Routes (all under /api) ─── */
+/* ─── API Routes ─── */
+/* PUBLIC-FIRST: put zones + waitlist before anything that could intercept */
+app.use('/api/zones', deliveryZonesRoutes);       // ⬅️ includes POST /check (public)
+app.use('/api/waitlist', waitlistRoutes);         // ⬅️ public
+
+/* General public + auth-mixed routes */
 app.use('/api/auth', authRoutes);
 app.use('/api/menubrowse', browseRoutes);
-app.use('/api/browse', browseRoutes); // alias for convenience
+app.use('/api/browse', browseRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/addresses', addressesRoutes);
 app.use('/api/profile', profileRoutes);
@@ -143,7 +142,6 @@ app.use('/api/coupons', couponsRoutes);
 app.use('/api/available-coupons', availableCouponRoutes);
 app.use('/api/customers', customersRoutes);
 app.use('/api/banners', bannersRoutes);
-app.use('/api/notifications', notificationsRoutes);
 app.use('/api/tickets', ticketsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/feedback', feedbackRoutes);
@@ -151,20 +149,14 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/contactus', contactUsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/zones', deliveryZonesRoutes);
-app.use('/api/waitlist', waitlistRoutes);
 
-/* 
-   IMPORTANT: No /api/menu mount here.
-   We will keep admin menu CRUD under a dedicated path to avoid clashing with the browse redirect.
-   If you need the old admin routes, mount them at /api/menu-admin:
-*/
+/* ✅ Correct: mount notifications ONLY under its own namespace */
+app.use('/api/notifications', notificationsRoutes);
+
+/* Admin menu CRUD under /api/menu-admin */
 app.use('/api/menu-admin', menuRoutes);
 
-/* ─── Legacy redirect: /api/menu → /api/menubrowse ───
-   This must come AFTER we decide not to mount /api/menu.
-   Handles both exact and with ID.
-*/
+/* Legacy redirect for menu */
 app.get('/api/menu', (_req, res) => res.redirect(308, '/api/menubrowse'));
 app.get('/api/menu/:id', (req, res) =>
   res.redirect(308, `/api/menubrowse/${encodeURIComponent(req.params.id)}`)
@@ -185,7 +177,7 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-/* ─── Cron: scheduled notifications ─── */
+/* ─── Cron for scheduled notifications ─── */
 cron.schedule('*/2 * * * *', async () => {
   try {
     const [due] = await pool.query(
