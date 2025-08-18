@@ -70,6 +70,10 @@ async function upsertOtp(email, otp, expiry) {
   return res.insertId;
 }
 
+function isBlocked(user) {
+  return !!(user && Number(user.blocked) === 1);
+}
+
 /**
  * Strict Indian mobile validation:
  * - Exactly 10 digits
@@ -88,7 +92,6 @@ function isValidPhoneIN(p) {
 async function assertPhoneNotLocked(userId, newPhone) {
   const user = await getUserById(userId);
   if (!user) return { ok: false, code: 404, msg: "User not found" };
-
   const existing = (user.phone || "").trim();
   if (existing && existing !== newPhone) {
     return { ok: false, code: 409, msg: "Phone already set and locked for this account" };
@@ -114,6 +117,12 @@ router.post("/send-otp", async (req, res) => {
     const email = normalizeEmail(req.body?.email);
     if (!email || !/\S+@\S+\.\S+/.test(email)) {
       return res.status(400).json({ message: "Valid email required" });
+    }
+
+    // If user exists and is blocked → stop right here
+    const existing = await getUserByEmail(email);
+    if (existing && isBlocked(existing)) {
+      return res.status(403).json({ message: "Account blocked" });
     }
 
     const otp = sixDigitOTP();
@@ -145,6 +154,11 @@ router.post("/verify-otp", async (req, res) => {
     const user = await getUserByEmail(email);
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    // Blocked users cannot log in
+    if (isBlocked(user)) {
+      return res.status(403).json({ message: "Account blocked" });
+    }
+
     const dbOtp = String(user.otp_code ?? "").padStart(6, "0");
     if (!dbOtp || dbOtp !== otpInput) {
       return res.status(400).json({ message: "Invalid OTP" });
@@ -157,7 +171,7 @@ router.post("/verify-otp", async (req, res) => {
 
     await pool.query("UPDATE users SET otp_code = NULL, otp_expiry = NULL WHERE id = ?", [user.id]);
 
-    const fresh = await getUserById(user.id); // reflect cleared otp fields
+    const fresh = await getUserById(user.id);
     const token = generateToken(fresh);
     return res.json({
       message: "OTP verified",
@@ -169,7 +183,7 @@ router.post("/verify-otp", async (req, res) => {
         email: fresh.email,
         phone: fresh.phone,
       },
-      needsPhone: !fresh.phone, // 👈 tell client whether to show phone screen
+      needsPhone: !fresh.phone,
     });
   } catch (err) {
     console.error("❌ Verify OTP Error:", err);
@@ -194,9 +208,14 @@ router.post("/save-phone", async (req, res) => {
     const user = await getUserByEmail(email);
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    // (Optional) prevent blocked users from altering profile
+    if (isBlocked(user)) {
+      return res.status(403).json({ message: "Account blocked" });
+    }
+
     const current = (user.phone || "").trim();
 
-    // ✅ If same number submitted again, return success (idempotent)
+    // ✅ Idempotent: same phone again → success
     if (current && current === rawPhone) {
       const token = generateToken(user);
       return res.json({
@@ -212,12 +231,12 @@ router.post("/save-phone", async (req, res) => {
       });
     }
 
-    // 🔒 If different number and already set → block (locked)
+    // 🔒 Different phone but already set → block
     if (current && current !== rawPhone) {
       return res.status(409).json({ message: "Phone already set and locked for this account" });
     }
 
-    // 🔐 Phone must be globally unique
+    // 🔐 Global uniqueness
     const uniq = await assertPhoneAvailableForUser(user.id, rawPhone);
     if (!uniq.ok) return res.status(uniq.code).json({ message: uniq.msg });
 
@@ -269,7 +288,12 @@ router.put("/users/:id/phone", verifyToken, async (req, res) => {
     const user = await getUserById(id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // 🔒 Cannot change once set (even admin here). Build a separate override if you need.
+    // (Optional) block gate
+    if (isBlocked(user)) {
+      return res.status(403).json({ message: "Account blocked" });
+    }
+
+    // 🔒 No changes once set
     const lock = await assertPhoneNotLocked(id, rawPhone);
     if (!lock.ok) return res.status(lock.code).json({ message: lock.msg });
 
@@ -310,8 +334,14 @@ router.post("/google-login", async (req, res) => {
     if (!email) return res.status(400).json({ message: "Missing email" });
 
     let user = await getUserByEmail(email);
+
+    // If existing user is blocked → deny
+    if (user && isBlocked(user)) {
+      return res.status(403).json({ message: "Account blocked" });
+    }
+
     if (!user) {
-      // handle schemas where password_hash is NOT NULL by setting placeholder
+      // create and then fetch
       const [ins] = await pool.query(
         "INSERT INTO users (full_name, email, phone, password_hash, role) VALUES (?, ?, NULL, 'otp_placeholder', 'customer')",
         [fullName, email]
@@ -331,7 +361,7 @@ router.post("/google-login", async (req, res) => {
         email: user.email,
         phone: user.phone,
       },
-      needsPhone: !user.phone, // keep client flow consistent here too
+      needsPhone: !user.phone,
     });
   } catch (err) {
     console.error("❌ Google Login Error:", err);
