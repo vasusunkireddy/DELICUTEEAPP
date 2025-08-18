@@ -78,8 +78,15 @@ router.get("/summary", async (req, res) => {
       [from, to]
     );
 
+    // Convert total to number to fix frontend error
+    const formattedRows = rows.map(row => ({
+      method: row.method,
+      total: parseFloat(row.total), // Convert DECIMAL string to number
+      txns: parseInt(row.txns, 10), // Ensure txns is an integer
+    }));
+
     console.log(`✅ Fetched summary for ${rows.length} methods`);
-    res.json(rows);
+    res.json(formattedRows);
   } catch (err) {
     console.error("🔥 GET SUMMARY ERROR:", err);
     res.status(500).json({ error: "Failed to fetch payment summary" });
@@ -162,16 +169,16 @@ router.post("/verify", async (req, res) => {
     }
 
     if (newStatus === "SUCCESS") {
-      const [user] = await pool.query(
+      const [order] = await pool.query(
         `SELECT customer_name AS name, email
          FROM orders
          WHERE id = ? AND user_id = ?`,
         [orderId, customerId]
       );
 
-      if (user.length > 0) {
-        const customerEmail = user[0].email;
-        const customerName = user[0].name || "Customer";
+      if (order.length > 0 && order[0].email) {
+        const customerEmail = order[0].email;
+        const customerName = order[0].name || "Customer";
 
         const mailOptions = {
           from: `"Delicute" <${process.env.EMAIL_USER}>`,
