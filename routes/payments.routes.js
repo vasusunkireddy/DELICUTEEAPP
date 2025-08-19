@@ -9,7 +9,7 @@ const router = express.Router();
 const PAYMENT_METHODS = {
   upi: [
     { name: "Paytm", vpa: "9652296548@pthdfc" },
-    { name: "PhonePe", vpa: "6301497335@ibl" },
+    { name: "PhonePe", vpa: "Q952457548@ybl" },
     { name: "GPay", vpa: "svasudevareddy18694@oksbi" },
   ],
   cod: ["COD"],
