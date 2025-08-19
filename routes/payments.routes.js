@@ -2,14 +2,21 @@ const express = require("express");
 const pool = require("../db");
 const nodemailer = require("nodemailer");
 const dayjs = require("dayjs");
+const Razorpay = require("razorpay");
 
 const router = express.Router();
+
+// Initialize Razorpay
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
 
 // Payment method options (aligned with schema's method enum)
 const PAYMENT_METHODS = {
   upi: [
     { name: "Paytm", vpa: "9652296548@pthdfc" },
-    { name: "PhonePe", vpa: "9652296548@ybl" },
+    { name: "PhonePe", vpa: "6301497335@ibl" },
     { name: "GPay", vpa: "svasudevareddy18694@oksbi" },
   ],
   card: ["Visa", "MasterCard", "Rupay"],
@@ -78,11 +85,10 @@ router.get("/summary", async (req, res) => {
       [from, to]
     );
 
-    // Convert total to number to fix frontend error
     const formattedRows = rows.map(row => ({
       method: row.method,
-      total: parseFloat(row.total), // Convert DECIMAL string to number
-      txns: parseInt(row.txns, 10), // Ensure txns is an integer
+      total: parseFloat(row.total),
+      txns: parseInt(row.txns, 10),
     }));
 
     console.log(`✅ Fetched summary for ${rows.length} methods`);
@@ -90,6 +96,99 @@ router.get("/summary", async (req, res) => {
   } catch (err) {
     console.error("🔥 GET SUMMARY ERROR:", err);
     res.status(500).json({ error: "Failed to fetch payment summary" });
+  }
+});
+
+// GET /api/payments/status/:orderId
+router.get("/status/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+  console.log("➡️ /api/payments/status request:", { orderId });
+
+  try {
+    const [payments] = await pool.query(
+      `SELECT status, razorpayOrderId, gatewayTxnId
+       FROM payments
+       WHERE orderId = ?`,
+      [orderId]
+    );
+
+    if (payments.length === 0) {
+      return res.status(404).json({ error: "Payment not found for this order" });
+    }
+
+    const payment = payments[0];
+
+    if (payment.status !== "PENDING" || !payment.razorpayOrderId) {
+      return res.json({ status: payment.status });
+    }
+
+    // Check Razorpay payment status
+    try {
+      const razorpayOrder = await razorpay.orders.fetch(payment.razorpayOrderId);
+      const paymentsForOrder = await razorpay.orders.fetchPayments(payment.razorpayOrderId);
+
+      if (paymentsForOrder.items.length > 0) {
+        const latestPayment = paymentsForOrder.items[0];
+        const newStatus = latestPayment.status === "captured" ? "SUCCESS" : latestPayment.status === "failed" ? "FAILED" : "PENDING";
+
+        if (newStatus !== payment.status) {
+          await pool.query(
+            `UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ?`,
+            [newStatus, latestPayment.id, orderId]
+          );
+          await pool.query(
+            `UPDATE orders SET payment_status = ? WHERE id = ?`,
+            [newStatus, orderId]
+          );
+
+          if (newStatus === "SUCCESS") {
+            const [order] = await pool.query(
+              `SELECT customer_name AS name, email
+               FROM orders
+               WHERE id = ?`,
+              [orderId]
+            );
+
+            if (order.length > 0 && order[0].email) {
+              const customerEmail = order[0].email;
+              const customerName = order[0].name || "Customer";
+
+              const mailOptions = {
+                from: `"Delicute" <${process.env.EMAIL_USER}>`,
+                to: customerEmail,
+                subject: "Delicute Payment Receipt",
+                html: `
+                  <h2>Hi ${customerName},</h2>
+                  <p>Thank you for your order with <strong>Delicute</strong> 🎉</p>
+                  <p>Your payment has been confirmed successfully.</p>
+                  <p><strong>Order ID:</strong> ${orderId}</p>
+                  <p><strong>Payment Method:</strong> UPI</p>
+                  <p><strong>Status:</strong> ${newStatus}</p>
+                  <br/>
+                  <p>We’re preparing your order and will notify you once it’s ready!</p>
+                  <p style="color:gray;font-size:12px;">Powered by Delicute</p>
+                `,
+              };
+
+              await transporter.sendMail(mailOptions);
+              console.log("📧 Email sent to customer:", customerEmail);
+            }
+          }
+        }
+
+        console.log(`✅ Payment status for order ${orderId}: ${newStatus}`);
+        return res.json({ status: newStatus });
+      }
+
+      console.log(`✅ Payment status for order ${orderId}: ${payment.status}`);
+      return res.json({ status: payment.status });
+    } catch (razorpayErr) {
+      console.error("🔥 RAZORPAY ERROR:", razorpayErr);
+      return res.json({ status: payment.status });
+    }
+  } catch (err) {
+    console.error("🔥 GET PAYMENT STATUS ERROR:", err);
+    res.status(500).json({ error: "Failed to fetch payment status" });
   }
 });
 
@@ -108,13 +207,29 @@ router.post("/create", async (req, res) => {
     return res.status(400).json({ error: `Invalid payment method. Must be one of: ${VALID_METHODS.join(", ")}` });
   }
 
+  let razorpayOrderId = null;
+  if (method === "UPI") {
+    try {
+      const razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(amount * 100), // Amount in paise
+        currency: "INR",
+        receipt: `order_${orderId}`,
+      });
+      razorpayOrderId = razorpayOrder.id;
+      console.log(`✅ Created Razorpay order: ${razorpayOrderId}`);
+    } catch (razorpayErr) {
+      console.error("🔥 RAZORPAY ORDER CREATE ERROR:", razorpayErr);
+      return res.status(500).json({ error: "Failed to create payment order" });
+    }
+  }
+
   const initialStatus = method === "COD" ? "SUCCESS" : "PENDING";
 
   try {
     const [result] = await pool.query(
-      `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, amount, initialStatus, gatewayTxnId || null, notes || null]
+      `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, razorpayOrderId, notes, paidAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [orderId, customerId, method, amount, initialStatus, gatewayTxnId || null, razorpayOrderId, notes || null]
     );
 
     await pool.query(
@@ -127,6 +242,7 @@ router.post("/create", async (req, res) => {
       success: true,
       paymentId: result.insertId,
       status: initialStatus,
+      razorpayOrderId, // Return Razorpay order ID for UPI payments
     });
   } catch (err) {
     console.error("🔥 CREATE PAYMENT ERROR:", err);
@@ -225,7 +341,9 @@ router.post("/refund", async (req, res) => {
 
   try {
     const [payment] = await pool.query(
-      `SELECT amount FROM payments WHERE orderId = ? AND customerId = ? AND status = 'SUCCESS'`,
+      `SELECT amount, razorpayOrderId, gatewayTxnId
+       FROM payments
+       WHERE orderId = ? AND customerId = ? AND status = 'SUCCESS'`,
       [orderId, customerId]
     );
 
@@ -237,11 +355,25 @@ router.post("/refund", async (req, res) => {
       return res.status(400).json({ error: "Refund amount exceeds payment amount" });
     }
 
+    let razorpayRefundId = refundId;
+    if (payment[0].gatewayTxnId && !refundId) {
+      try {
+        const refund = await razorpay.payments.refund(payment[0].gatewayTxnId, {
+          amount: Math.round(refundAmount * 100), // Amount in paise
+        });
+        razorpayRefundId = refund.id;
+        console.log(`✅ Razorpay refund initiated: ${razorpayRefundId}`);
+      } catch (razorpayErr) {
+        console.error("🔥 RAZORPAY REFUND ERROR:", razorpayErr);
+        return res.status(500).json({ error: "Failed to initiate refund with payment gateway" });
+      }
+    }
+
     const [result] = await pool.query(
       `UPDATE payments
        SET status = 'REFUNDED', refundId = ?, refundAmount = ?, refundAt = NOW(), notes = ?
        WHERE orderId = ? AND customerId = ?`,
-      [refundId || null, refundAmount, notes || null, orderId, customerId]
+      [razorpayRefundId || null, refundAmount, notes || null, orderId, customerId]
     );
 
     if (result.affectedRows === 0) {
