@@ -94,7 +94,7 @@ async function assertPhoneNotLocked(userId, newPhone) {
   if (!user) return { ok: false, code: 404, msg: "User not found" };
   const existing = (user.phone || "").trim();
   if (existing && existing !== newPhone) {
-    return { ok: false, code: 409, msg: "Phone already set and locked for this account" };
+    return { ok: false, code: 409, msg: "Use the Registered Phone number This is invalid" };
   }
   return { ok: true, user };
 }
