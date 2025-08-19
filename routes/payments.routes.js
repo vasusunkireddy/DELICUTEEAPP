@@ -38,14 +38,14 @@ const verifyUPIPayment = async (orderId, gatewayTxnId) => {
 
 // GET /api/payments/methods
 router.get("/methods", (_req, res) => {
-  console.log("Handling GET /api/payments/methods");
+  console.log("📡 GET /api/payments/methods");
   res.json(PAYMENT_METHODS);
 });
 
 // GET /api/payments/status/:orderId
 router.get("/status/:orderId", async (req, res) => {
   const { orderId } = req.params;
-  console.log("➡️ /api/payments/status request:", { orderId });
+  console.log("📡 GET /api/payments/status/:orderId", { orderId });
 
   try {
     const [payments] = await pool.query(
@@ -123,7 +123,7 @@ router.get("/status/:orderId", async (req, res) => {
 // POST /api/payments/create
 router.post("/create", async (req, res) => {
   const { orderId, customerId, method, amount, gatewayTxnId, notes } = req.body;
-  console.log("➡️ /api/payments/create request:", { orderId, customerId, method, amount, gatewayTxnId, notes });
+  console.log("📡 POST /api/payments/create", { orderId, customerId, method, amount, gatewayTxnId, notes });
 
   if (!orderId || !customerId || !method || !amount || amount <= 0) {
     return res.status(400).json({
@@ -139,7 +139,7 @@ router.post("/create", async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, amount, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
+      [orderId, customerId, method, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
     );
 
     await pool.query(
@@ -163,7 +163,7 @@ router.post("/create", async (req, res) => {
 // POST /api/payments/verify
 router.post("/verify", async (req, res) => {
   const { orderId, customerId, method, success, gatewayTxnId } = req.body;
-  console.log("➡️ /api/payments/verify request:", { orderId, customerId, method, success, gatewayTxnId });
+  console.log("📡 POST /api/payments/verify", { orderId, customerId, method, success, gatewayTxnId });
 
   if (!orderId || !customerId || !method) {
     return res.status(400).json({ error: "Missing orderId, customerId, or method" });
@@ -239,7 +239,7 @@ router.post("/verify", async (req, res) => {
 // POST /api/payments/cancel
 router.post("/cancel", async (req, res) => {
   const { orderId, customerId } = req.body;
-  console.log("➡️ /api/payments/cancel request:", { orderId, customerId });
+  console.log("📡 POST /api/payments/cancel", { orderId, customerId });
 
   if (!orderId || !customerId) {
     return res.status(400).json({ error: "Missing orderId or customerId" });
