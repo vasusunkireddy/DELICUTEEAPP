@@ -5,18 +5,17 @@ const dayjs = require("dayjs");
 
 const router = express.Router();
 
-// Payment method options (aligned with schema's method enum)
+// Payment method options
 const PAYMENT_METHODS = {
   upi: [
     { name: "Paytm", vpa: "9652296548@pthdfc" },
     { name: "PhonePe", vpa: "Q952457548@ybl" },
-    { name: "GPay", vpa: "svasudevareddy18694@oksbi" },
+    { name: "GPay", vpa: "svasudevareddy18604@oksbi" },
   ],
-  cod: ["COD"],
 };
 
-// Valid payment methods for validation
-const VALID_METHODS = ["COD", "UPI"];
+// Valid payment methods
+const VALID_METHODS = ["UPI", "COD"];
 
 // Configure Nodemailer
 const transporter = nodemailer.createTransport({
@@ -27,10 +26,8 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Simulated UPI verification (replace with real bank/UPI provider API)
+// Simulated UPI verification (replace with real UPI provider API)
 const verifyUPIPayment = async (orderId, gatewayTxnId) => {
-  // Mock logic: Assume payment is successful if gatewayTxnId ends with "success"
-  //iamas: Replace with actual API call to your UPI provider (e.g., bank or aggregator like Juspay)
   if (gatewayTxnId && gatewayTxnId.endsWith("success")) {
     return { status: "SUCCESS", transactionId: gatewayTxnId };
   } else if (gatewayTxnId && gatewayTxnId.endsWith("failed")) {
@@ -43,63 +40,6 @@ const verifyUPIPayment = async (orderId, gatewayTxnId) => {
 router.get("/methods", (_req, res) => {
   console.log("Handling GET /api/payments/methods");
   res.json(PAYMENT_METHODS);
-});
-
-// GET /api/payments?from={date}&to={date}
-router.get("/", async (req, res) => {
-  const { from, to } = req.query;
-  console.log("➡️ /api/payments request:", { from, to });
-
-  if (!from || !to || !dayjs(from).isValid() || !dayjs(to).isValid()) {
-    return res.status(400).json({ error: "Invalid or missing from/to dates" });
-  }
-
-  try {
-    const [rows] = await pool.query(
-      `SELECT id, orderId, customerId, method, amount, status
-       FROM payments
-       WHERE paidAt BETWEEN ? AND DATE_ADD(?, INTERVAL 1 DAY)`,
-      [from, to]
-    );
-
-    console.log(`✅ Fetched ${rows.length} payments`);
-    res.json(rows);
-  } catch (err) {
-    console.error("🔥 GET PAYMENTS ERROR:", err);
-    res.status(500).json({ error: "Failed to fetch payments" });
-  }
-});
-
-// GET /api/payments/summary?from={date}&to={date}
-router.get("/summary", async (req, res) => {
-  const { from, to } = req.query;
-  console.log("➡️ /api/payments/summary request:", { from, to });
-
-  if (!from || !to || !dayjs(from).isValid() || !dayjs(to).isValid()) {
-    return res.status(400).json({ error: "Invalid or missing from/to dates" });
-  }
-
-  try {
-    const [rows] = await pool.query(
-      `SELECT method, SUM(amount) AS total, COUNT(*) AS txns
-       FROM payments
-       WHERE paidAt BETWEEN ? AND DATE_ADD(?, INTERVAL 1 DAY)
-       GROUP BY method`,
-      [from, to]
-    );
-
-    const formattedRows = rows.map(row => ({
-      method: row.method,
-      total: parseFloat(row.total),
-      txns: parseInt(row.txns, 10),
-    }));
-
-    console.log(`✅ Fetched summary for ${rows.length} methods`);
-    res.json(formattedRows);
-  } catch (err) {
-    console.error("🔥 GET SUMMARY ERROR:", err);
-    res.status(500).json({ error: "Failed to fetch payment summary" });
-  }
 });
 
 // GET /api/payments/status/:orderId
@@ -125,7 +65,6 @@ router.get("/status/:orderId", async (req, res) => {
       return res.json({ status: payment.status });
     }
 
-    // Simulate UPI verification (replace with real UPI provider API)
     const verification = await verifyUPIPayment(orderId, payment.gatewayTxnId);
 
     if (verification.status !== payment.status) {
@@ -193,28 +132,27 @@ router.post("/create", async (req, res) => {
   }
 
   if (!VALID_METHODS.includes(method)) {
-    return res.status(400).json({ error: `Invalid payment method. Must be one of: ${VALID_METHODS.join(", ")}` });
+    return res.status(400).json({ error: `Invalid payment method. Must be: ${VALID_METHODS.join(", ")}` });
   }
-
-  const initialStatus = method === "COD" ? "SUCCESS" : "PENDING";
 
   try {
     const [result] = await pool.query(
       `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, amount, initialStatus, gatewayTxnId || null, notes || null]
+      [orderId, customerId, method, amount, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
     );
 
     await pool.query(
       `UPDATE orders SET payment_status = ?, payment_method = ?, payment_id = ? WHERE id = ? AND user_id = ?`,
-      [initialStatus, method, result.insertId, orderId, customerId]
+      [method === "COD" ? "SUCCESS" : "PENDING", method, result.insertId, orderId, customerId]
     );
 
     console.log("✅ Payment record created:", result.insertId);
     res.json({
       success: true,
       paymentId: result.insertId,
-      status: initialStatus,
+      status: method === "COD" ? "SUCCESS" : "PENDING",
+      orderId,
     });
   } catch (err) {
     console.error("🔥 CREATE PAYMENT ERROR:", err);
@@ -232,10 +170,10 @@ router.post("/verify", async (req, res) => {
   }
 
   if (!VALID_METHODS.includes(method)) {
-    return res.status(400).json({ error: `Invalid payment method. Must be one of: ${VALID_METHODS.join(", ")}` });
+    return res.status(400).json({ error: `Invalid payment method. Must be: ${VALID_METHODS.join(", ")}` });
   }
 
-  const newStatus = method === "COD" ? "SUCCESS" : success === true ? "SUCCESS" : "FAILED";
+  const newStatus = success === true ? "SUCCESS" : "FAILED";
 
   try {
     const [paymentUpdate] = await pool.query(
@@ -287,8 +225,6 @@ router.post("/verify", async (req, res) => {
 
         await transporter.sendMail(mailOptions);
         console.log("📧 Email sent to customer:", customerEmail);
-      } else {
-        console.warn("⚠️ No customer email found for order:", orderId);
       }
     }
 
