@@ -2,15 +2,8 @@ const express = require("express");
 const pool = require("../db");
 const nodemailer = require("nodemailer");
 const dayjs = require("dayjs");
-const Razorpay = require("razorpay");
 
 const router = express.Router();
-
-// Initialize Razorpay
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
 
 // Payment method options (aligned with schema's method enum)
 const PAYMENT_METHODS = {
@@ -19,13 +12,11 @@ const PAYMENT_METHODS = {
     { name: "PhonePe", vpa: "6301497335@ibl" },
     { name: "GPay", vpa: "svasudevareddy18694@oksbi" },
   ],
-  card: ["Visa", "MasterCard", "Rupay"],
-  wallet: ["Mobikwik Wallet"],
   cod: ["COD"],
 };
 
 // Valid payment methods for validation
-const VALID_METHODS = ["COD", "UPI", "CARD", "WALLET"];
+const VALID_METHODS = ["COD", "UPI"];
 
 // Configure Nodemailer
 const transporter = nodemailer.createTransport({
@@ -35,6 +26,18 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
 });
+
+// Simulated UPI verification (replace with real bank/UPI provider API)
+const verifyUPIPayment = async (orderId, gatewayTxnId) => {
+  // Mock logic: Assume payment is successful if gatewayTxnId ends with "success"
+  //iamas: Replace with actual API call to your UPI provider (e.g., bank or aggregator like Juspay)
+  if (gatewayTxnId && gatewayTxnId.endsWith("success")) {
+    return { status: "SUCCESS", transactionId: gatewayTxnId };
+  } else if (gatewayTxnId && gatewayTxnId.endsWith("failed")) {
+    return { status: "FAILED", transactionId: gatewayTxnId };
+  }
+  return { status: "PENDING" };
+};
 
 // GET /api/payments/methods
 router.get("/methods", (_req, res) => {
@@ -106,7 +109,7 @@ router.get("/status/:orderId", async (req, res) => {
 
   try {
     const [payments] = await pool.query(
-      `SELECT status, razorpayOrderId, gatewayTxnId
+      `SELECT status, gatewayTxnId
        FROM payments
        WHERE orderId = ?`,
       [orderId]
@@ -118,74 +121,60 @@ router.get("/status/:orderId", async (req, res) => {
 
     const payment = payments[0];
 
-    if (payment.status !== "PENDING" || !payment.razorpayOrderId) {
+    if (payment.status !== "PENDING") {
       return res.json({ status: payment.status });
     }
 
-    // Check Razorpay payment status
-    try {
-      const razorpayOrder = await razorpay.orders.fetch(payment.razorpayOrderId);
-      const paymentsForOrder = await razorpay.orders.fetchPayments(payment.razorpayOrderId);
+    // Simulate UPI verification (replace with real UPI provider API)
+    const verification = await verifyUPIPayment(orderId, payment.gatewayTxnId);
 
-      if (paymentsForOrder.items.length > 0) {
-        const latestPayment = paymentsForOrder.items[0];
-        const newStatus = latestPayment.status === "captured" ? "SUCCESS" : latestPayment.status === "failed" ? "FAILED" : "PENDING";
+    if (verification.status !== payment.status) {
+      await pool.query(
+        `UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ?`,
+        [verification.status, verification.transactionId || payment.gatewayTxnId, orderId]
+      );
+      await pool.query(
+        `UPDATE orders SET payment_status = ? WHERE id = ?`,
+        [verification.status, orderId]
+      );
 
-        if (newStatus !== payment.status) {
-          await pool.query(
-            `UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ?`,
-            [newStatus, latestPayment.id, orderId]
-          );
-          await pool.query(
-            `UPDATE orders SET payment_status = ? WHERE id = ?`,
-            [newStatus, orderId]
-          );
+      if (verification.status === "SUCCESS") {
+        const [order] = await pool.query(
+          `SELECT customer_name AS name, email
+           FROM orders
+           WHERE id = ?`,
+          [orderId]
+        );
 
-          if (newStatus === "SUCCESS") {
-            const [order] = await pool.query(
-              `SELECT customer_name AS name, email
-               FROM orders
-               WHERE id = ?`,
-              [orderId]
-            );
+        if (order.length > 0 && order[0].email) {
+          const customerEmail = order[0].email;
+          const customerName = order[0].name || "Customer";
 
-            if (order.length > 0 && order[0].email) {
-              const customerEmail = order[0].email;
-              const customerName = order[0].name || "Customer";
+          const mailOptions = {
+            from: `"Delicute" <${process.env.EMAIL_USER}>`,
+            to: customerEmail,
+            subject: "Delicute Payment Receipt",
+            html: `
+              <h2>Hi ${customerName},</h2>
+              <p>Thank you for your order with <strong>Delicute</strong> 🎉</p>
+              <p>Your payment has been confirmed successfully.</p>
+              <p><strong>Order ID:</strong> ${orderId}</p>
+              <p><strong>Payment Method:</strong> UPI</p>
+              <p><strong>Status:</strong> ${verification.status}</p>
+              <br/>
+              <p>We’re preparing your order and will notify you once it’s ready!</p>
+              <p style="color:gray;font-size:12px;">Powered by Delicute</p>
+            `,
+          };
 
-              const mailOptions = {
-                from: `"Delicute" <${process.env.EMAIL_USER}>`,
-                to: customerEmail,
-                subject: "Delicute Payment Receipt",
-                html: `
-                  <h2>Hi ${customerName},</h2>
-                  <p>Thank you for your order with <strong>Delicute</strong> 🎉</p>
-                  <p>Your payment has been confirmed successfully.</p>
-                  <p><strong>Order ID:</strong> ${orderId}</p>
-                  <p><strong>Payment Method:</strong> UPI</p>
-                  <p><strong>Status:</strong> ${newStatus}</p>
-                  <br/>
-                  <p>We’re preparing your order and will notify you once it’s ready!</p>
-                  <p style="color:gray;font-size:12px;">Powered by Delicute</p>
-                `,
-              };
-
-              await transporter.sendMail(mailOptions);
-              console.log("📧 Email sent to customer:", customerEmail);
-            }
-          }
+          await transporter.sendMail(mailOptions);
+          console.log("📧 Email sent to customer:", customerEmail);
         }
-
-        console.log(`✅ Payment status for order ${orderId}: ${newStatus}`);
-        return res.json({ status: newStatus });
       }
-
-      console.log(`✅ Payment status for order ${orderId}: ${payment.status}`);
-      return res.json({ status: payment.status });
-    } catch (razorpayErr) {
-      console.error("🔥 RAZORPAY ERROR:", razorpayErr);
-      return res.json({ status: payment.status });
     }
+
+    console.log(`✅ Payment status for order ${orderId}: ${verification.status}`);
+    res.json({ status: verification.status });
   } catch (err) {
     console.error("🔥 GET PAYMENT STATUS ERROR:", err);
     res.status(500).json({ error: "Failed to fetch payment status" });
@@ -207,29 +196,13 @@ router.post("/create", async (req, res) => {
     return res.status(400).json({ error: `Invalid payment method. Must be one of: ${VALID_METHODS.join(", ")}` });
   }
 
-  let razorpayOrderId = null;
-  if (method === "UPI") {
-    try {
-      const razorpayOrder = await razorpay.orders.create({
-        amount: Math.round(amount * 100), // Amount in paise
-        currency: "INR",
-        receipt: `order_${orderId}`,
-      });
-      razorpayOrderId = razorpayOrder.id;
-      console.log(`✅ Created Razorpay order: ${razorpayOrderId}`);
-    } catch (razorpayErr) {
-      console.error("🔥 RAZORPAY ORDER CREATE ERROR:", razorpayErr);
-      return res.status(500).json({ error: "Failed to create payment order" });
-    }
-  }
-
   const initialStatus = method === "COD" ? "SUCCESS" : "PENDING";
 
   try {
     const [result] = await pool.query(
-      `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, razorpayOrderId, notes, paidAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, amount, initialStatus, gatewayTxnId || null, razorpayOrderId, notes || null]
+      `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [orderId, customerId, method, amount, initialStatus, gatewayTxnId || null, notes || null]
     );
 
     await pool.query(
@@ -242,7 +215,6 @@ router.post("/create", async (req, res) => {
       success: true,
       paymentId: result.insertId,
       status: initialStatus,
-      razorpayOrderId, // Return Razorpay order ID for UPI payments
     });
   } catch (err) {
     console.error("🔥 CREATE PAYMENT ERROR:", err);
@@ -328,68 +300,35 @@ router.post("/verify", async (req, res) => {
   }
 });
 
-// POST /api/payments/refund
-router.post("/refund", async (req, res) => {
-  const { orderId, customerId, refundAmount, refundId, notes } = req.body;
-  console.log("➡️ /api/payments/refund request:", { orderId, customerId, refundAmount, refundId, notes });
+// POST /api/payments/cancel
+router.post("/cancel", async (req, res) => {
+  const { orderId, customerId } = req.body;
+  console.log("➡️ /api/payments/cancel request:", { orderId, customerId });
 
-  if (!orderId || !customerId || !refundAmount || refundAmount <= 0) {
-    return res.status(400).json({
-      error: "Missing or invalid fields (orderId, customerId, refundAmount)",
-    });
+  if (!orderId || !customerId) {
+    return res.status(400).json({ error: "Missing orderId or customerId" });
   }
 
   try {
-    const [payment] = await pool.query(
-      `SELECT amount, razorpayOrderId, gatewayTxnId
-       FROM payments
-       WHERE orderId = ? AND customerId = ? AND status = 'SUCCESS'`,
+    const [paymentUpdate] = await pool.query(
+      `UPDATE payments SET status = 'CANCELLED' WHERE orderId = ? AND customerId = ? AND status = 'PENDING'`,
       [orderId, customerId]
     );
 
-    if (payment.length === 0) {
-      return res.status(404).json({ error: "No successful payment found for this order" });
-    }
-
-    if (refundAmount > payment[0].amount) {
-      return res.status(400).json({ error: "Refund amount exceeds payment amount" });
-    }
-
-    let razorpayRefundId = refundId;
-    if (payment[0].gatewayTxnId && !refundId) {
-      try {
-        const refund = await razorpay.payments.refund(payment[0].gatewayTxnId, {
-          amount: Math.round(refundAmount * 100), // Amount in paise
-        });
-        razorpayRefundId = refund.id;
-        console.log(`✅ Razorpay refund initiated: ${razorpayRefundId}`);
-      } catch (razorpayErr) {
-        console.error("🔥 RAZORPAY REFUND ERROR:", razorpayErr);
-        return res.status(500).json({ error: "Failed to initiate refund with payment gateway" });
-      }
-    }
-
-    const [result] = await pool.query(
-      `UPDATE payments
-       SET status = 'REFUNDED', refundId = ?, refundAmount = ?, refundAt = NOW(), notes = ?
-       WHERE orderId = ? AND customerId = ?`,
-      [razorpayRefundId || null, refundAmount, notes || null, orderId, customerId]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Payment not found or already refunded" });
+    if (paymentUpdate.affectedRows === 0) {
+      return res.status(404).json({ error: "Payment not found, not pending, or customer mismatch" });
     }
 
     await pool.query(
-      `UPDATE orders SET payment_status = 'REFUNDED' WHERE id = ? AND user_id = ?`,
+      `UPDATE orders SET payment_status = 'CANCELLED' WHERE id = ? AND user_id = ?`,
       [orderId, customerId]
     );
 
-    console.log("✅ Refund processed:", { orderId, refundAmount });
-    res.json({ success: true, status: "REFUNDED" });
+    console.log("✅ Payment cancelled:", { orderId });
+    res.json({ success: true, status: "CANCELLED" });
   } catch (err) {
-    console.error("🔥 REFUND ERROR:", err);
-    res.status(500).json({ error: "Failed to process refund" });
+    console.error("🔥 CANCEL PAYMENT ERROR:", err);
+    res.status(500).json({ error: "Failed to cancel payment" });
   }
 });
 
