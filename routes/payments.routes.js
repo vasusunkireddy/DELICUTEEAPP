@@ -1,11 +1,10 @@
 const express = require("express");
 const pool = require("../db");
 const nodemailer = require("nodemailer");
-const dayjs = require("dayjs");
 
 const router = express.Router();
 
-// Payment method options
+// Payment methods
 const PAYMENT_METHODS = {
   upi: [
     { name: "Paytm", vpa: "9652296548@pthdfc" },
@@ -14,10 +13,9 @@ const PAYMENT_METHODS = {
   ],
 };
 
-// Valid payment methods
 const VALID_METHODS = ["UPI", "COD"];
 
-// Configure Nodemailer
+// Nodemailer
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -26,7 +24,7 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Simulated UPI verification (replace with real UPI provider API)
+// Simulated UPI verification
 const verifyUPIPayment = async (orderUid, gatewayTxnId) => {
   if (gatewayTxnId && gatewayTxnId.endsWith("success")) {
     return { status: "SUCCESS", transactionId: gatewayTxnId };
@@ -46,17 +44,24 @@ router.get("/status/:orderUid", async (req, res) => {
   const { orderUid } = req.params;
 
   try {
-    const [payments] = await pool.query(
-      `SELECT status, gatewayTxnId
-       FROM payments
-       WHERE orderUid = ?`,
+    // Resolve orderUid → id
+    const [orderRows] = await pool.query(
+      "SELECT id, payment_status, customer_name AS name, email FROM orders WHERE orderUid = ?",
       [orderUid]
     );
+    if (orderRows.length === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const order = orderRows[0];
 
+    // Get payment
+    const [payments] = await pool.query(
+      "SELECT * FROM payments WHERE orderId = ?",
+      [order.id]
+    );
     if (payments.length === 0) {
       return res.status(404).json({ error: "Payment not found" });
     }
-
     const payment = payments[0];
 
     if (payment.status !== "PENDING") {
@@ -67,39 +72,25 @@ router.get("/status/:orderUid", async (req, res) => {
 
     if (verification.status !== payment.status) {
       await pool.query(
-        `UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderUid = ?`,
-        [verification.status, verification.transactionId || payment.gatewayTxnId, orderUid]
+        "UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ?",
+        [verification.status, verification.transactionId || payment.gatewayTxnId, order.id]
+      );
+      await pool.query(
+        "UPDATE orders SET payment_status = ? WHERE id = ?",
+        [verification.status, order.id]
       );
 
-      const [order] = await pool.query(
-        `SELECT id AS orderId, customer_name AS name, email, user_id AS customerId
-         FROM orders
-         WHERE orderUid = ?`,
-        [orderUid]
-      );
-
-      if (order.length > 0) {
-        const orderId = order[0].orderId;
-        await pool.query(
-          `UPDATE orders SET payment_status = ? WHERE id = ?`,
-          [verification.status, orderId]
-        );
-
-        if (verification.status === "SUCCESS" && order[0].email) {
-          const mailOptions = {
-            from: `"Delicute" <${process.env.EMAIL_USER}>`,
-            to: order[0].email,
-            subject: "Delicute Payment Receipt",
-            html: `
-              <h2>Hi ${order[0].name || "Customer"},</h2>
-              <p>Thank you for your order with <strong>Delicute</strong> 🎉</p>
-              <p>Your payment has been confirmed successfully.</p>
-              <p><strong>Order ID:</strong> ${orderUid}</p>
-              <p><strong>Status:</strong> ${verification.status}</p>
-            `,
-          };
-          await transporter.sendMail(mailOptions);
-        }
+      if (verification.status === "SUCCESS" && order.email) {
+        await transporter.sendMail({
+          from: `"Delicute" <${process.env.EMAIL_USER}>`,
+          to: order.email,
+          subject: "Delicute Payment Receipt",
+          html: `
+            <h2>Hi ${order.name || "Customer"},</h2>
+            <p>Your payment for order ${orderUid} is confirmed ✅</p>
+            <p>Status: ${verification.status}</p>
+          `,
+        });
       }
     }
 
@@ -112,30 +103,38 @@ router.get("/status/:orderUid", async (req, res) => {
 
 // POST /api/payments/create
 router.post("/create", async (req, res) => {
-  const { orderId, orderUid, customerId, method, amount, gatewayTxnId, notes } = req.body;
+  const { orderUid, customerId, method, amount, gatewayTxnId, notes } = req.body;
 
-  if (!orderId || !orderUid || !customerId || !method || !amount || amount <= 0) {
-    return res.status(400).json({
-      error: "Missing or invalid fields",
-    });
+  if (!orderUid || !customerId || !method || !amount || amount <= 0) {
+    return res.status(400).json({ error: "Missing or invalid fields" });
   }
-
   if (!VALID_METHODS.includes(method)) {
     return res.status(400).json({ error: `Invalid payment method. Must be: ${VALID_METHODS.join(", ")}` });
   }
 
   try {
-    // Insert into payments
+    // Resolve orderUid → id
+    const [orderRows] = await pool.query(
+      "SELECT id FROM orders WHERE orderUid = ? AND user_id = ?",
+      [orderUid, customerId]
+    );
+    if (orderRows.length === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const orderId = orderRows[0].id;
+
+    // Insert payment
     const [result] = await pool.query(
-      `INSERT INTO payments (orderId, orderUid, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, orderUid, customerId, method, amount, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
+      `INSERT INTO payments 
+       (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [orderId, customerId, method, amount, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
     );
 
-    // Update order
+    // Update order payment info
     await pool.query(
-      `UPDATE orders SET payment_status = ?, payment_method = ?, payment_id = ? WHERE id = ? AND user_id = ?`,
-      [method === "COD" ? "SUCCESS" : "PENDING", method, result.insertId, orderId, customerId]
+      `UPDATE orders SET payment_status = ?, payment_method = ?, payment_id = ? WHERE id = ?`,
+      [method === "COD" ? "SUCCESS" : "PENDING", method, result.insertId, orderId]
     );
 
     res.json({
@@ -158,35 +157,49 @@ router.post("/verify", async (req, res) => {
     return res.status(400).json({ error: "Missing fields" });
   }
 
-  const newStatus = success === true ? "SUCCESS" : "FAILED";
-
   try {
+    const [orderRows] = await pool.query(
+      "SELECT id, email, customer_name AS name FROM orders WHERE orderUid = ? AND user_id = ?",
+      [orderUid, customerId]
+    );
+    if (orderRows.length === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const orderId = orderRows[0].id;
+    const order = orderRows[0];
+
+    const newStatus = success ? "SUCCESS" : "FAILED";
+
     const [paymentUpdate] = await pool.query(
-      `UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderUid = ? AND customerId = ?`,
-      [newStatus, gatewayTxnId || null, orderUid, customerId]
+      "UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ? AND customerId = ?",
+      [newStatus, gatewayTxnId || null, orderId, customerId]
     );
 
     if (paymentUpdate.affectedRows === 0) {
-      return res.status(404).json({ error: "Payment not found or customer mismatch" });
-    }
-
-    const [order] = await pool.query(
-      `SELECT id AS orderId FROM orders WHERE orderUid = ? AND user_id = ?`,
-      [orderUid, customerId]
-    );
-
-    if (order.length === 0) {
-      return res.status(404).json({ error: "Order not found or customer mismatch" });
+      return res.status(404).json({ error: "Payment not found" });
     }
 
     await pool.query(
-      `UPDATE orders SET payment_status = ?, payment_method = ? WHERE id = ?`,
-      [newStatus, method, order[0].orderId]
+      "UPDATE orders SET payment_status = ?, payment_method = ? WHERE id = ? AND user_id = ?",
+      [newStatus, method, orderId, customerId]
     );
+
+    if (newStatus === "SUCCESS" && order.email) {
+      await transporter.sendMail({
+        from: `"Delicute" <${process.env.EMAIL_USER}>`,
+        to: order.email,
+        subject: "Delicute Payment Receipt",
+        html: `
+          <h2>Hi ${order.name || "Customer"},</h2>
+          <p>Your payment for order ${orderUid} is confirmed ✅</p>
+          <p>Status: ${newStatus}</p>
+        `,
+      });
+    }
 
     res.json({ success: true, status: newStatus });
   } catch (err) {
-    console.error("🔥 VERIFY PAYMENT ERROR:", err);
+    console.error("🔥 VERIFY ERROR:", err);
     res.status(500).json({ error: "Payment verification failed" });
   }
 });
@@ -196,22 +209,29 @@ router.post("/cancel", async (req, res) => {
   const { orderUid, customerId } = req.body;
 
   if (!orderUid || !customerId) {
-    return res.status(400).json({ error: "Missing orderUid or customerId" });
+    return res.status(400).json({ error: "Missing fields" });
   }
 
   try {
-    const [paymentUpdate] = await pool.query(
-      `UPDATE payments SET status = 'CANCELLED' WHERE orderUid = ? AND customerId = ? AND status = 'PENDING'`,
+    const [orderRows] = await pool.query(
+      "SELECT id FROM orders WHERE orderUid = ? AND user_id = ?",
       [orderUid, customerId]
     );
+    if (orderRows.length === 0) return res.status(404).json({ error: "Order not found" });
 
+    const orderId = orderRows[0].id;
+
+    const [paymentUpdate] = await pool.query(
+      "UPDATE payments SET status = 'CANCELLED' WHERE orderId = ? AND customerId = ? AND status = 'PENDING'",
+      [orderId, customerId]
+    );
     if (paymentUpdate.affectedRows === 0) {
-      return res.status(404).json({ error: "Payment not found, not pending, or customer mismatch" });
+      return res.status(404).json({ error: "Payment not pending or not found" });
     }
 
     await pool.query(
-      `UPDATE orders SET payment_status = 'CANCELLED' WHERE orderUid = ? AND user_id = ?`,
-      [orderUid, customerId]
+      "UPDATE orders SET payment_status = 'CANCELLED' WHERE id = ?",
+      [orderId]
     );
 
     res.json({ success: true, status: "CANCELLED" });
