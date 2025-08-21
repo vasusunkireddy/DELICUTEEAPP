@@ -1,7 +1,6 @@
 const express = require("express");
 const pool = require("../db");
 const nodemailer = require("nodemailer");
-const dayjs = require("dayjs");
 
 const router = express.Router();
 
@@ -38,14 +37,12 @@ const verifyUPIPayment = async (orderId, gatewayTxnId) => {
 
 // GET /api/payments/methods
 router.get("/methods", (_req, res) => {
-  console.log("📡 GET /api/payments/methods");
   res.json(PAYMENT_METHODS);
 });
 
 // GET /api/payments/status/:orderId
 router.get("/status/:orderId", async (req, res) => {
   const { orderId } = req.params;
-  console.log("📡 GET /api/payments/status/:orderId", { orderId });
 
   try {
     const [payments] = await pool.query(
@@ -61,10 +58,12 @@ router.get("/status/:orderId", async (req, res) => {
 
     const payment = payments[0];
 
+    // If already final, just return
     if (payment.status !== "PENDING") {
       return res.json({ status: payment.status });
     }
 
+    // Verify UPI if pending
     const verification = await verifyUPIPayment(orderId, payment.gatewayTxnId);
 
     if (verification.status !== payment.status) {
@@ -72,11 +71,13 @@ router.get("/status/:orderId", async (req, res) => {
         `UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ?`,
         [verification.status, verification.transactionId || payment.gatewayTxnId, orderId]
       );
+
       await pool.query(
         `UPDATE orders SET payment_status = ? WHERE id = ?`,
         [verification.status, orderId]
       );
 
+      // Send receipt if successful
       if (verification.status === "SUCCESS") {
         const [order] = await pool.query(
           `SELECT customer_name AS name, email
@@ -99,7 +100,7 @@ router.get("/status/:orderId", async (req, res) => {
               <p>Your payment has been confirmed successfully.</p>
               <p><strong>Order ID:</strong> ${orderId}</p>
               <p><strong>Payment Method:</strong> UPI</p>
-              <p><strong>Status:</strong> ${verification.status}</p>
+              <p><strong>Status:</strong> SUCCESS</p>
               <br/>
               <p>We’re preparing your order and will notify you once it’s ready!</p>
               <p style="color:gray;font-size:12px;">Powered by Delicute</p>
@@ -107,12 +108,10 @@ router.get("/status/:orderId", async (req, res) => {
           };
 
           await transporter.sendMail(mailOptions);
-          console.log("📧 Email sent to customer:", customerEmail);
         }
       }
     }
 
-    console.log(`✅ Payment status for order ${orderId}: ${verification.status}`);
     res.json({ status: verification.status });
   } catch (err) {
     console.error("🔥 GET PAYMENT STATUS ERROR:", err);
@@ -123,7 +122,6 @@ router.get("/status/:orderId", async (req, res) => {
 // POST /api/payments/create
 router.post("/create", async (req, res) => {
   const { orderId, customerId, method, amount, gatewayTxnId, notes } = req.body;
-  console.log("📡 POST /api/payments/create", { orderId, customerId, method, amount, gatewayTxnId, notes });
 
   if (!orderId || !customerId || !method || !amount || amount <= 0) {
     return res.status(400).json({
@@ -136,22 +134,23 @@ router.post("/create", async (req, res) => {
   }
 
   try {
+    const status = method === "COD" ? "SUCCESS" : "PENDING";
+
     const [result] = await pool.query(
       `INSERT INTO payments (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
+      [orderId, customerId, method, amount, status, gatewayTxnId || null, notes || null]
     );
 
     await pool.query(
       `UPDATE orders SET payment_status = ?, payment_method = ?, payment_id = ? WHERE id = ? AND user_id = ?`,
-      [method === "COD" ? "SUCCESS" : "PENDING", method, result.insertId, orderId, customerId]
+      [status, method, result.insertId, orderId, customerId]
     );
 
-    console.log("✅ Payment record created:", result.insertId);
     res.json({
       success: true,
       paymentId: result.insertId,
-      status: method === "COD" ? "SUCCESS" : "PENDING",
+      status,
       orderId,
     });
   } catch (err) {
@@ -163,7 +162,6 @@ router.post("/create", async (req, res) => {
 // POST /api/payments/verify
 router.post("/verify", async (req, res) => {
   const { orderId, customerId, method, success, gatewayTxnId } = req.body;
-  console.log("📡 POST /api/payments/verify", { orderId, customerId, method, success, gatewayTxnId });
 
   if (!orderId || !customerId || !method) {
     return res.status(400).json({ error: "Missing orderId, customerId, or method" });
@@ -185,14 +183,10 @@ router.post("/verify", async (req, res) => {
       return res.status(404).json({ error: "Payment not found or customer mismatch" });
     }
 
-    const [orderUpdate] = await pool.query(
+    await pool.query(
       `UPDATE orders SET payment_status = ?, payment_method = ? WHERE id = ? AND user_id = ?`,
       [newStatus, method, orderId, customerId]
     );
-
-    if (orderUpdate.affectedRows === 0) {
-      return res.status(404).json({ error: "Order not found or customer mismatch" });
-    }
 
     if (newStatus === "SUCCESS") {
       const [order] = await pool.query(
@@ -216,7 +210,7 @@ router.post("/verify", async (req, res) => {
             <p>Your payment has been confirmed successfully.</p>
             <p><strong>Order ID:</strong> ${orderId}</p>
             <p><strong>Payment Method:</strong> ${method}</p>
-            <p><strong>Status:</strong> ${newStatus}</p>
+            <p><strong>Status:</strong> SUCCESS</p>
             <br/>
             <p>We’re preparing your order and will notify you once it’s ready!</p>
             <p style="color:gray;font-size:12px;">Powered by Delicute</p>
@@ -224,11 +218,9 @@ router.post("/verify", async (req, res) => {
         };
 
         await transporter.sendMail(mailOptions);
-        console.log("📧 Email sent to customer:", customerEmail);
       }
     }
 
-    console.log("✅ Payment verified:", { orderId, newStatus });
     res.json({ success: true, status: newStatus });
   } catch (err) {
     console.error("🔥 VERIFY ERROR:", err);
@@ -239,7 +231,6 @@ router.post("/verify", async (req, res) => {
 // POST /api/payments/cancel
 router.post("/cancel", async (req, res) => {
   const { orderId, customerId } = req.body;
-  console.log("📡 POST /api/payments/cancel", { orderId, customerId });
 
   if (!orderId || !customerId) {
     return res.status(400).json({ error: "Missing orderId or customerId" });
@@ -260,7 +251,6 @@ router.post("/cancel", async (req, res) => {
       [orderId, customerId]
     );
 
-    console.log("✅ Payment cancelled:", { orderId });
     res.json({ success: true, status: "CANCELLED" });
   } catch (err) {
     console.error("🔥 CANCEL PAYMENT ERROR:", err);
