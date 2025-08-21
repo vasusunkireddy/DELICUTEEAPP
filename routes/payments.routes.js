@@ -44,7 +44,6 @@ router.get("/status/:orderUid", async (req, res) => {
   const { orderUid } = req.params;
 
   try {
-    // Resolve orderUid → id
     const [orderRows] = await pool.query(
       "SELECT id, payment_status, customer_name AS name, email FROM orders WHERE orderUid = ?",
       [orderUid]
@@ -54,10 +53,9 @@ router.get("/status/:orderUid", async (req, res) => {
     }
     const order = orderRows[0];
 
-    // Get payment
     const [payments] = await pool.query(
-      "SELECT * FROM payments WHERE orderId = ?",
-      [order.id]
+      "SELECT * FROM payments WHERE orderUid = ?",
+      [orderUid]
     );
     if (payments.length === 0) {
       return res.status(404).json({ error: "Payment not found" });
@@ -72,8 +70,8 @@ router.get("/status/:orderUid", async (req, res) => {
 
     if (verification.status !== payment.status) {
       await pool.query(
-        "UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ?",
-        [verification.status, verification.transactionId || payment.gatewayTxnId, order.id]
+        "UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderUid = ?",
+        [verification.status, verification.transactionId || payment.gatewayTxnId, orderUid]
       );
       await pool.query(
         "UPDATE orders SET payment_status = ? WHERE id = ?",
@@ -113,7 +111,6 @@ router.post("/create", async (req, res) => {
   }
 
   try {
-    // Resolve orderUid → id
     const [orderRows] = await pool.query(
       "SELECT id FROM orders WHERE orderUid = ? AND user_id = ?",
       [orderUid, customerId]
@@ -123,15 +120,13 @@ router.post("/create", async (req, res) => {
     }
     const orderId = orderRows[0].id;
 
-    // Insert payment
     const [result] = await pool.query(
       `INSERT INTO payments 
-       (orderId, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, amount, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
+       (orderId, orderUid, customerId, method, amount, status, gatewayTxnId, notes, paidAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [orderId, orderUid, customerId, method, amount, method === "COD" ? "SUCCESS" : "PENDING", gatewayTxnId || null, notes || null]
     );
 
-    // Update order payment info
     await pool.query(
       `UPDATE orders SET payment_status = ?, payment_method = ?, payment_id = ? WHERE id = ?`,
       [method === "COD" ? "SUCCESS" : "PENDING", method, result.insertId, orderId]
@@ -171,8 +166,8 @@ router.post("/verify", async (req, res) => {
     const newStatus = success ? "SUCCESS" : "FAILED";
 
     const [paymentUpdate] = await pool.query(
-      "UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderId = ? AND customerId = ?",
-      [newStatus, gatewayTxnId || null, orderId, customerId]
+      "UPDATE payments SET status = ?, gatewayTxnId = ? WHERE orderUid = ? AND customerId = ?",
+      [newStatus, gatewayTxnId || null, orderUid, customerId]
     );
 
     if (paymentUpdate.affectedRows === 0) {
@@ -222,8 +217,8 @@ router.post("/cancel", async (req, res) => {
     const orderId = orderRows[0].id;
 
     const [paymentUpdate] = await pool.query(
-      "UPDATE payments SET status = 'CANCELLED' WHERE orderId = ? AND customerId = ? AND status = 'PENDING'",
-      [orderId, customerId]
+      "UPDATE payments SET status = 'CANCELLED' WHERE orderUid = ? AND customerId = ? AND status = 'PENDING'",
+      [orderUid, customerId]
     );
     if (paymentUpdate.affectedRows === 0) {
       return res.status(404).json({ error: "Payment not pending or not found" });
