@@ -44,6 +44,7 @@ const userRoutes = require('./routes/user.routes');
 const categoriesRoutes = require('./routes/categories.routes');
 const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); // ⬅️ has POST /check
 const waitlistRoutes = require('./routes/waitlist.routes');
+const chatRoutes = require('./routes/chat.routes');
 
 /* ─── Ensure uploads directories ─── */
 const uploadsBase = path.join(__dirname, 'uploads');
@@ -148,6 +149,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/contactus', contactUsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/chat', chatRoutes);
 
 /* ✅ FIXED: mount notifications at /api (not /api/notifications) */
 app.use('/api', notificationsRoutes);
