@@ -7,12 +7,12 @@ const router = express.Router();
 /** ----------------------- AUTH ----------------------- */
 function verifyToken(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
-  if (!token) return res.status(401).json({ message: 'Auth token missing' });
+  if (!token) return res.status(401).json({ error: 'Auth token missing' });
   try {
     req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
   } catch {
-    res.status(401).json({ message: 'Invalid or expired token' });
+    res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 router.use(verifyToken);
@@ -185,13 +185,13 @@ router.post('/', async (req, res, next) => {
     const qty = toInt(req.body.quantity ?? 1);
 
     if (!Number.isInteger(itemId) || itemId <= 0 || !Number.isInteger(qty) || qty < 1) {
-      return res.status(400).json({ message: 'menu_item_id and quantity (>=1) are required' });
+      return res.status(400).json({ error: 'menu_item_id and quantity (>=1) are required' });
     }
 
     const menuItem = await ensureMenuItemExists(itemId);
     if (!menuItem) {
       console.error(`[cart.js] Menu item not found: menu_item_id=${itemId}, name=${menuItem?.name || 'unknown'}`);
-      return res.status(404).json({ message: 'Menu item not found' });
+      return res.status(404).json({ error: 'Menu item not found' });
     }
 
     const [existing] = await pool.query(
@@ -222,9 +222,9 @@ router.post('/', async (req, res, next) => {
   } catch (err) {
     console.error('[cart.js] Add/update error:', err);
     if (err?.code === 'ER_NO_REFERENCED_ROW_2') {
-      return res.status(400).json({ message: 'Invalid menu_item_id (not found in menu_items)' });
+      return res.status(400).json({ error: 'Invalid menu_item_id (not found in menu_items)' });
     }
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -236,10 +236,10 @@ async function updateItem(req, res, next) {
     const qty = toInt(req.body.quantity);
 
     if (!Number.isInteger(itemId) || itemId <= 0) {
-      return res.status(400).json({ message: 'Invalid itemId' });
+      return res.status(400).json({ error: 'Invalid itemId' });
     }
     if (!Number.isInteger(qty)) {
-      return res.status(400).json({ message: 'quantity required' });
+      return res.status(400).json({ error: 'quantity required' });
     }
 
     if (qty <= 0) {
@@ -254,7 +254,7 @@ async function updateItem(req, res, next) {
     const menuItem = await ensureMenuItemExists(itemId);
     if (!menuItem) {
       console.error(`[cart.js] Menu item not found: menu_item_id=${itemId}, name=${menuItem?.name || 'unknown'}`);
-      return res.status(404).json({ message: 'Menu item not found' });
+      return res.status(404).json({ error: 'Menu item not found' });
     }
 
     const [existing] = await pool.query(
@@ -284,7 +284,7 @@ async function updateItem(req, res, next) {
     return res.json({ ok: true, cart: summary });
   } catch (err) {
     console.error('[cart.js] Update error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 }
 router.patch('/:itemId', updateItem);
@@ -296,7 +296,7 @@ router.delete('/:itemId', async (req, res, next) => {
     const userId = req.user.id;
     const itemId = toInt(req.params.itemId);
     if (!Number.isInteger(itemId) || itemId <= 0) {
-      return res.status(400).json({ message: 'Invalid itemId' });
+      return res.status(400).json({ error: 'Invalid itemId' });
     }
 
     await pool.query(
@@ -308,7 +308,7 @@ router.delete('/:itemId', async (req, res, next) => {
     return res.json({ ok: true, cart: summary });
   } catch (err) {
     console.error('[cart.js] Delete error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -324,7 +324,7 @@ router.delete('/', async (req, res, next) => {
     return res.json({ ok: true, cart: summary });
   } catch (err) {
     console.error('[cart.js] Clear cart error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -336,14 +336,14 @@ router.get('/', async (req, res, next) => {
     return res.json(summary);
   } catch (err) {
     console.error('[cart.js] Fetch error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // Global error handler
 router.use((err, req, res, next) => {
   console.error('[cart.js] Unhandled error:', err);
-  res.status(500).json({ message: 'Internal server error' });
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 module.exports = router;
