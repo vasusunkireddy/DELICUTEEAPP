@@ -1,37 +1,22 @@
 const express = require('express');
-const pool = require('../db'); // your MySQL pool
-const QRCode = require('qrcode');
-const { sendOrderStatusEmail } = require('../../utils/mailer');
-
 const router = express.Router();
+const pool = require('../db');
+const QRCode = require('qrcode');
+const { sendOrderStatusEmail } = require('../utils/mailer');
 
-// -------------------- Admin: Get all orders --------------------
+/* ─── ADMIN: Get all orders ─── */
 router.get('/admin', async (_req, res) => {
   try {
-    // Fetch all orders
     const [orders] = await pool.query(`
       SELECT 
-        id,
-        orderUid,
-        user_id,
-        customer_name,
-        phone,
-        address,
-        total,
-        status,
-        payment_method AS paymentMethod,
-        payment_status AS paymentStatus,
-        payment_id,
-        delivered_at,
-        cancel_reason,
-        created_at
-      FROM orders
-      ORDER BY created_at DESC
+        o.id, o.user_id, o.address, o.total, o.status, o.payment_method AS paymentMethod,
+        o.payment_status AS paymentStatus, o.payment_id, o.customer_name, o.phone, o.created_at
+      FROM orders o
+      ORDER BY o.created_at DESC
     `);
 
-    // Fetch items for each order
     const withItems = await Promise.all(
-      orders.map(async (order) => {
+      orders.map(async order => {
         const [items] = await pool.query(
           'SELECT name, price, qty FROM order_items WHERE order_id = ? ORDER BY name',
           [order.id]
@@ -47,23 +32,21 @@ router.get('/admin', async (_req, res) => {
   }
 });
 
-// -------------------- Admin: Update order status --------------------
+/* ─── ADMIN: Update order status ─── */
 router.patch('/admin/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status, reason } = req.body;
 
   if (!status) return res.status(400).json({ message: 'Status is required' });
-  if (status === 'Cancelled' && !reason)
-    return res.status(400).json({ message: 'Reason required for cancellation' });
+  if (status === 'Cancelled' && !reason) return res.status(400).json({ message: 'Reason required for cancellation' });
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
 
-    // Update order
     await conn.query(
       `UPDATE orders
-         SET status = ?,
+         SET status = ?, 
              cancel_reason = CASE WHEN ? = 'Cancelled' THEN ? ELSE NULL END,
              delivered_at = CASE WHEN ? = 'Delivered' THEN NOW() ELSE delivered_at END,
              payment_status = CASE WHEN ? = 'Delivered' THEN 'PAID' ELSE payment_status END
@@ -71,27 +54,13 @@ router.patch('/admin/:id/status', async (req, res) => {
       [status, status, reason || null, status, status, id]
     );
 
-    // Fetch updated order
     const [[order]] = await conn.query(
-      `SELECT 
-        id,
-        orderUid,
-        customer_name,
-        phone,
-        address,
-        total,
-        status,
-        payment_method AS paymentMethod,
-        payment_status AS paymentStatus,
-        payment_id,
-        delivered_at,
-        cancel_reason,
-        created_at
+      `SELECT id, total, status, cancel_reason, payment_method AS paymentMethod,
+              payment_status AS paymentStatus, payment_id, customer_name, phone, created_at
        FROM orders WHERE id = ?`,
       [id]
     );
 
-    // Fetch items
     const [items] = await conn.query(
       'SELECT name, price, qty FROM order_items WHERE order_id = ? ORDER BY name',
       [id]
@@ -104,11 +73,11 @@ router.patch('/admin/:id/status', async (req, res) => {
     if (order.email) {
       sendOrderStatusEmail({
         to: order.email,
-        name: order.customer_name,
+        name: order.customer_name || 'Customer',
         orderId: order.id,
         status: order.status,
         reason: reason || '',
-      }).catch((e) => console.warn('Email failed:', e.message));
+      }).catch(e => console.warn('Email failed:', e.message));
     }
 
     res.json(order);
@@ -121,7 +90,7 @@ router.patch('/admin/:id/status', async (req, res) => {
   }
 });
 
-// -------------------- Admin: Delete order --------------------
+/* ─── ADMIN: Delete order ─── */
 router.delete('/admin/:id', async (req, res) => {
   const { id } = req.params;
   const conn = await pool.getConnection();
@@ -140,26 +109,23 @@ router.delete('/admin/:id', async (req, res) => {
   }
 });
 
-// -------------------- Generate UPI QR --------------------
-router.get('/generate-qr/:identifier', async (req, res) => {
-  const { identifier } = req.params;
-  let query, param;
-
-  if (/^\d+$/.test(identifier)) {
-    query = 'SELECT id, total FROM orders WHERE id = ?';
-    param = Number(identifier);
-  } else {
-    query = 'SELECT id, total FROM orders WHERE orderUid = ?';
-    param = identifier;
-  }
+/* ─── GENERATE UPI QR ─── */
+router.get('/generate-qr/:id', async (req, res) => {
+  const orderId = Number(req.params.id);
+  if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'Invalid order ID' });
 
   try {
-    const [rows] = await pool.query(query, [param]);
+    const [rows] = await pool.query('SELECT id, total FROM orders WHERE id = ?', [orderId]);
     if (!rows.length) return res.status(404).json({ message: 'Order not found' });
 
     const order = rows[0];
+
     const upiId = '9652296548@ybl';
-    const upiUrl = `upi://pay?pa=${upiId}&pn=Delicute&tn=Order#${order.id}&am=${order.total.toFixed(2)}&cu=INR`;
+    const payeeName = encodeURIComponent('Delicute');
+    const amount = Number(order.total).toFixed(2);
+    const txnNote = encodeURIComponent(`Order #${order.id}`);
+    const currency = 'INR';
+    const upiUrl = `upi://pay?pa=${upiId}&pn=${payeeName}&tn=${txnNote}&am=${amount}&cu=${currency}`;
 
     const qrDataUrl = await QRCode.toDataURL(upiUrl, { errorCorrectionLevel: 'H', scale: 8 });
     const img = Buffer.from(qrDataUrl.split(',')[1], 'base64');
@@ -172,5 +138,29 @@ router.get('/generate-qr/:identifier', async (req, res) => {
   }
 });
 
+/* ─── CUSTOMER: Get own orders ─── */
+router.get('/myorders/:userId', async (req, res) => {
+  const userId = Number(req.params.userId);
+  if (!Number.isInteger(userId)) return res.status(400).json({ message: 'Invalid user ID' });
+
+  try {
+    const [orders] = await pool.query(
+      'SELECT id, total, status, payment_status AS paymentStatus, payment_method AS paymentMethod, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC',
+      [userId]
+    );
+
+    const withItems = await Promise.all(
+      orders.map(async order => {
+        const [items] = await pool.query('SELECT name, price, qty FROM order_items WHERE order_id = ?', [order.id]);
+        return { ...order, items };
+      })
+    );
+
+    res.json(withItems);
+  } catch (err) {
+    console.error('Customer orders fetch error →', err.message);
+    res.status(500).json({ message: 'Failed to load orders', error: err.message });
+  }
+});
 
 module.exports = router;
