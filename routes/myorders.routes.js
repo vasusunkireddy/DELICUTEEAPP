@@ -32,7 +32,6 @@ function toFloat(val, def = null) {
 }
 
 /* ------------------------ GET /customer-orders/user/:userId ------------------------ */
-// Fetch all orders for a user
 router.get('/user/:userId', async (req, res) => {
   try {
     const userId = toInt(req.params.userId);
@@ -50,11 +49,10 @@ router.get('/user/:userId', async (req, res) => {
          JSON_ARRAYAGG(
            JSON_OBJECT(
              'menu_item_id', oi.menu_item_id,
-             'quantity', oi.quantity,
+             'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
-             'image_url', oi.image_url,
-             'is_available', mi.is_active
+             'image_url', COALESCE(oi.image_url, mi.image_url, '')
            )
          ) AS items
        FROM orders o
@@ -66,10 +64,16 @@ router.get('/user/:userId', async (req, res) => {
       [userId]
     );
 
-    // Normalize response to ensure items is always an array
+    // Normalize response to ensure items is always an array and image_url is absolute
+    const baseUrl = 'https://delicuteeapp.onrender.com';
     const normalizedOrders = orders.map(order => ({
       ...order,
-      items: order.items && order.items !== 'null' ? JSON.parse(order.items) : [],
+      items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
+        ...item,
+        image_url: item.image_url && item.image_url.startsWith('/') 
+          ? `${baseUrl}${item.image_url}` 
+          : item.image_url || ''
+      })) : [],
       total: toFloat(order.total, 0),
       rating: toInt(order.rating),
     }));
@@ -82,7 +86,6 @@ router.get('/user/:userId', async (req, res) => {
 });
 
 /* ------------------------ PATCH /customer-orders/:orderId/cancel ------------------------ */
-// Cancel an order
 router.patch('/:orderId/cancel', async (req, res) => {
   try {
     const orderId = toInt(req.params.orderId);
@@ -145,7 +148,6 @@ router.patch('/:orderId/cancel', async (req, res) => {
 });
 
 /* ------------------------ POST /customer-orders/:orderId/rate ------------------------ */
-// Rate an order
 router.post('/:orderId/rate', async (req, res) => {
   try {
     const orderId = toInt(req.params.orderId);
