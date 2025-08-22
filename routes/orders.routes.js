@@ -2,23 +2,53 @@ const express = require('express');
 const pool = require('../db');
 const QRCode = require('qrcode'); // npm install qrcode
 const { sendOrderStatusEmail } = require('../../utils/mailer');
+const jwt = require('jsonwebtoken'); // npm install jsonwebtoken
 
 const router = express.Router();
+
+// Authentication middleware (example)
+const authMiddleware = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1]; // Expect "Bearer <token>"
+  if (!token) {
+    console.log(`Unauthorized request to ${req.path}: No token provided`);
+    return res.status(401).json({ message: 'Unauthorized: No token provided' });
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+    req.user = decoded; // Store user data (e.g., userId) for use in routes
+    next();
+  } catch (err) {
+    console.error(`Invalid token for ${req.path}:`, err.message);
+    return res.status(401).json({ message: 'Unauthorized: Invalid token' });
+  }
+};
 
 // Test database connection on startup
 pool.query('SELECT 1')
   .then(() => console.log('Database connection successful'))
-  .catch(err => console.error('Database connection error:', err));
+  .catch(err => console.error('Database connection error:', err.message, err.stack));
 
 // Test query to verify orders
-pool.query('SELECT id, total FROM orders WHERE id IN (36, 50)')
+pool.query('SELECT id, total FROM orders WHERE id IN (36, 48, 49, 50)')
   .then(([rows]) => console.log('Test query result:', rows))
-  .catch(err => console.error('Test query error:', err));
+  .catch(err => console.error('Test query error:', err.message, err.stack));
+
+// Test endpoint to verify database contents
+router.get('/test-orders', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id, total FROM orders WHERE id IN (36, 48, 49, 50)');
+    console.log('Test orders endpoint result:', rows);
+    res.json(rows);
+  } catch (err) {
+    console.error('Test orders error:', err.message, err.stack);
+    res.status(500).json({ message: 'Failed to fetch test orders', error: err.message });
+  }
+});
 
 /* ═══════════════════════════════════════════════════════════
-   GET /api/orders/admin – Admin order list
+   GET /api/orders/admin – Admin order list (requires auth)
    ═══════════════════════════════════════════════════════════ */
-router.get('/admin', async (_req, res) => {
+router.get('/admin', authMiddleware, async (_req, res) => {
   try {
     const [orders] = await pool.query(`
       SELECT
@@ -54,15 +84,15 @@ router.get('/admin', async (_req, res) => {
     console.log(`Fetched ${withItems.length} orders:`, withItems.map(o => ({ id: o.id, total: o.total })));
     res.json(withItems);
   } catch (err) {
-    console.error('Admin orders fetch error →', err.message);
+    console.error('Admin orders fetch error →', err.message, err.stack);
     res.status(500).json({ message: 'Failed to load orders', error: err.message });
   }
 });
 
 /* ═══════════════════════════════════════════════════════════
-   PATCH /api/orders/admin/:id/status – update status
+   PATCH /api/orders/admin/:id/status – update status (requires auth)
    ═══════════════════════════════════════════════════════════ */
-router.patch('/admin/:id/status', async (req, res) => {
+router.patch('/admin/:id/status', authMiddleware, async (req, res) => {
   const { id } = req.params;
   const { status, reason } = req.body;
 
@@ -123,7 +153,7 @@ router.patch('/admin/:id/status', async (req, res) => {
     res.json(order);
   } catch (err) {
     await conn.rollback();
-    console.error('Admin status update error →', err.message);
+    console.error('Admin status update error →', err.message, err.stack);
     res.status(500).json({ message: 'Failed to update status', error: err.message });
   } finally {
     conn.release();
@@ -131,9 +161,9 @@ router.patch('/admin/:id/status', async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════════════════════
-   DELETE /api/orders/admin/:id – delete order + items
+   DELETE /api/orders/admin/:id – delete order + items (requires auth)
    ═══════════════════════════════════════════════════════════ */
-router.delete('/admin/:id', async (req, res) => {
+router.delete('/admin/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
   const conn = await pool.getConnection();
   try {
@@ -144,7 +174,7 @@ router.delete('/admin/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     await conn.rollback();
-    console.error('Admin order delete error →', err.message);
+    console.error('Admin order delete error →', err.message, err.stack);
     res.status(500).json({ message: 'Failed to delete order', error: err.message });
   } finally {
     conn.release();
@@ -152,7 +182,7 @@ router.delete('/admin/:id', async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════════════════════
-   GET /api/orders/generate-qr/:orderId – Generate dynamic UPI QR
+   GET /api/orders/generate-qr/:orderId – Generate dynamic UPI QR (public)
    ═══════════════════════════════════════════════════════════ */
 router.get('/generate-qr/:orderId', async (req, res) => {
   const { orderId } = req.params;
