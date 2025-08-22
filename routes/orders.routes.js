@@ -1,5 +1,6 @@
 const express = require('express');
 const pool = require('../db');
+const QRCode = require('qrcode'); // npm install qrcode
 const { sendOrderStatusEmail } = require('../../utils/mailer');
 
 const router = express.Router();
@@ -19,10 +20,10 @@ router.get('/admin', async (_req, res) => {
         o.payment_method AS paymentMethod,
         o.payment_status AS paymentStatus,
         o.payment_id,
-        COALESCE(a.receiver_name,u.full_name) AS customerName,
-        COALESCE(a.receiver_phone,u.phone) AS phone,
+        COALESCE(a.receiver_name, u.full_name) AS customerName,
+        COALESCE(a.receiver_phone, u.phone) AS phone,
         u.email,
-        CONCAT(a.line1, ', ', IFNULL(a.city,''), ' - ', a.pincode) AS address,
+        CONCAT(a.line1, ', ', IFNULL(a.city, ''), ' - ', a.pincode) AS address,
         o.created_at
       FROM orders o
       LEFT JOIN addresses a ON a.id = o.address
@@ -77,10 +78,10 @@ router.patch('/admin/:id/status', async (req, res) => {
               o.payment_method AS paymentMethod,
               o.payment_status AS paymentStatus,
               o.payment_id,
-              COALESCE(a.receiver_name,u.full_name) AS customerName,
-              COALESCE(a.receiver_phone,u.phone) AS phone,
+              COALESCE(a.receiver_name, u.full_name) AS customerName,
+              COALESCE(a.receiver_phone, u.phone) AS phone,
               u.email,
-              CONCAT(a.line1, ', ', IFNULL(a.city,''), ' - ', a.pincode) AS address
+              CONCAT(a.line1, ', ', IFNULL(a.city, ''), ' - ', a.pincode) AS address
          FROM orders o
          LEFT JOIN addresses a ON a.id = o.address
          LEFT JOIN users u ON u.id = o.user_id
@@ -136,6 +137,51 @@ router.delete('/admin/:id', async (req, res) => {
     res.status(500).json({ message: 'Failed to delete order' });
   } finally {
     conn.release();
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════
+   GET /api/orders/generate-qr/:orderId – Generate dynamic UPI QR
+   ═══════════════════════════════════════════════════════════ */
+router.get('/generate-qr/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+  try {
+    // Fetch order details
+    const [[order]] = await pool.query(
+      `SELECT id, total FROM orders WHERE id = ?`,
+      [orderId]
+    );
+
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    // UPI Payment details
+    const upiId = '9652296548@ybl'; // Correct UPI ID
+    const payeeName = encodeURIComponent('Delicute'); // Encode merchant name
+    const amount = Number(order.total).toFixed(2); // Ensure amount is a number with 2 decimal places
+    const txnNote = encodeURIComponent(`Order #${order.id}`); // Encode transaction note
+    const currency = 'INR';
+
+    // Construct UPI payment URL
+    const upiUrl = `upi://pay?pa=${upiId}&pn=${payeeName}&tn=${txnNote}&am=${amount}&cu=${currency}`;
+
+    // Generate QR as Data URL
+    const qrDataUrl = await QRCode.toDataURL(upiUrl, {
+      errorCorrectionLevel: 'H', // High error correction for robustness
+      type: 'image/png',
+      margin: 2,
+      scale: 8, // Increase scale for better readability
+    });
+
+    // Convert Data URL to image response
+    const img = Buffer.from(qrDataUrl.split(',')[1], 'base64');
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': img.length,
+    });
+    res.end(img);
+  } catch (err) {
+    console.error('QR generation error →', err.message);
+    res.status(500).json({ message: 'Failed to generate QR code' });
   }
 });
 
