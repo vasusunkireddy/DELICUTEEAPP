@@ -34,7 +34,10 @@ router.get('/admin', async (_req, res) => {
     const withItems = await Promise.all(
       orders.map(async (order) => {
         const [items] = await pool.query(
-          `SELECT name, price, qty FROM order_items WHERE order_id = ? ORDER BY name`,
+          `SELECT name, price, qty 
+             FROM order_items 
+            WHERE order_id = ? 
+         ORDER BY name`,
           [order.id]
         );
         return { ...order, items };
@@ -49,10 +52,11 @@ router.get('/admin', async (_req, res) => {
 });
 
 /* ═══════════════════════════════════════════════════════════
-   PATCH /api/orders/admin/:orderUid/status – update status
+   PATCH /api/orders/admin/:id/status – update status
+   (still uses orderUid internally for tracking/email)
    ═══════════════════════════════════════════════════════════ */
-router.patch('/admin/:orderUid/status', async (req, res) => {
-  const { orderUid } = req.params;
+router.patch('/admin/:id/status', async (req, res) => {
+  const { id } = req.params;
   const { status, reason } = req.body;
 
   if (!status) return res.status(400).json({ message: 'Status is required' });
@@ -65,12 +69,12 @@ router.patch('/admin/:orderUid/status', async (req, res) => {
 
     await conn.query(
       `UPDATE orders
-         SET status = ?,
-             cancel_reason = CASE WHEN ? = 'Cancelled' THEN ? ELSE NULL END,
-             delivered_at = CASE WHEN ? = 'Delivered' THEN NOW() ELSE delivered_at END,
-             payment_status = CASE WHEN ? = 'Delivered' THEN 'PAID' ELSE payment_status END
-       WHERE orderUid = ?`,
-      [status, status, reason || null, status, status, orderUid]
+          SET status = ?,
+              cancel_reason = CASE WHEN ? = 'Cancelled' THEN ? ELSE NULL END,
+              delivered_at = CASE WHEN ? = 'Delivered' THEN NOW() ELSE delivered_at END,
+              payment_status = CASE WHEN ? = 'Delivered' THEN 'PAID' ELSE payment_status END
+        WHERE id = ?`,
+      [status, status, reason || null, status, status, id]
     );
 
     const [[order]] = await conn.query(
@@ -85,8 +89,8 @@ router.patch('/admin/:orderUid/status', async (req, res) => {
          FROM orders o
          LEFT JOIN addresses a ON a.id = o.address
          LEFT JOIN users u ON u.id = o.user_id
-         WHERE o.orderUid = ?`,
-      [orderUid]
+        WHERE o.id = ?`,
+      [id]
     );
 
     if (!order) {
@@ -105,7 +109,7 @@ router.patch('/admin/:orderUid/status', async (req, res) => {
       sendOrderStatusEmail({
         to: order.email,
         name: order.customerName,
-        orderId: order.orderUid,
+        orderId: order.orderUid, // keep UID for email subject/reference
         status: order.status,
         reason: order.cancel_reason || '',
       })
@@ -124,21 +128,33 @@ router.patch('/admin/:orderUid/status', async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════════════════════
-   DELETE /api/orders/admin/:orderUid – delete order + items
+   DELETE /api/orders/admin/:id – delete order + items
+   (strictly uses numeric ID only)
    ═══════════════════════════════════════════════════════════ */
-router.delete('/admin/:orderUid', async (req, res) => {
-  const { orderUid } = req.params;
+router.delete('/admin/:id', async (req, res) => {
+  const { id } = req.params;
   const conn = await pool.getConnection();
+
   try {
     await conn.beginTransaction();
-    const [[order]] = await conn.query(`SELECT id FROM orders WHERE orderUid = ?`, [orderUid]);
+
+    const [[order]] = await conn.query(
+      `SELECT id, orderUid FROM orders WHERE id = ?`,
+      [id]
+    );
+
     if (!order) {
-      throw new Error('Order not found');
+      await conn.rollback();
+      return res.status(404).json({ message: 'Order not found' });
     }
-    await conn.query('DELETE FROM order_items WHERE order_id = ?', [order.id]);
-    await conn.query('DELETE FROM orders WHERE orderUid = ?', [orderUid]);
+
+    // delete items first
+    await conn.query(`DELETE FROM order_items WHERE order_id = ?`, [order.id]);
+    // delete order
+    await conn.query(`DELETE FROM orders WHERE id = ?`, [order.id]);
+
     await conn.commit();
-    res.json({ success: true });
+    res.json({ success: true, deletedOrder: order.id });
   } catch (err) {
     await conn.rollback();
     console.error('Admin order delete error →', err.message);
