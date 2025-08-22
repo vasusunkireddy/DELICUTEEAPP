@@ -141,40 +141,36 @@ router.delete('/admin/:id', async (req, res) => {
 });
 
 // -------------------- Generate UPI QR --------------------
-router.get('/generate-qr/:orderId', async (req, res) => {
-  const { orderId } = req.params;
+router.get('/generate-qr/:identifier', async (req, res) => {
+  const { identifier } = req.params;
+  let query, param;
+
+  if (/^\d+$/.test(identifier)) {
+    query = 'SELECT id, total FROM orders WHERE id = ?';
+    param = Number(identifier);
+  } else {
+    query = 'SELECT id, total FROM orders WHERE orderUid = ?';
+    param = identifier;
+  }
+
   try {
-    const orderIdNum = Number(orderId);
-    if (!Number.isInteger(orderIdNum)) return res.status(400).json({ message: 'Invalid order ID' });
-
-    const [rows] = await pool.query(
-      'SELECT id, total, customer_name, phone FROM orders WHERE id = ?',
-      [orderIdNum]
-    );
-
+    const [rows] = await pool.query(query, [param]);
     if (!rows.length) return res.status(404).json({ message: 'Order not found' });
 
     const order = rows[0];
-
     const upiId = '9652296548@ybl';
-    const payeeName = encodeURIComponent('Delicute');
-    const amount = Number(order.total).toFixed(2);
-    const txnNote = encodeURIComponent(`Order #${order.id}`);
-    const currency = 'INR';
+    const upiUrl = `upi://pay?pa=${upiId}&pn=Delicute&tn=Order#${order.id}&am=${order.total.toFixed(2)}&cu=INR`;
 
-    const upiUrl = `upi://pay?pa=${upiId}&pn=${payeeName}&tn=${txnNote}&am=${amount}&cu=${currency}`;
-    const qrDataUrl = await QRCode.toDataURL(upiUrl, { errorCorrectionLevel: 'H', type: 'image/png', margin: 2, scale: 8 });
+    const qrDataUrl = await QRCode.toDataURL(upiUrl, { errorCorrectionLevel: 'H', scale: 8 });
     const img = Buffer.from(qrDataUrl.split(',')[1], 'base64');
 
-    res.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': img.length,
-    });
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': img.length });
     res.end(img);
   } catch (err) {
-    console.error('QR generation error →', err);
+    console.error('QR generation error →', err.message);
     res.status(500).json({ message: 'Failed to generate QR code', error: err.message });
   }
 });
+
 
 module.exports = router;
