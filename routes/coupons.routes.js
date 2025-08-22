@@ -21,7 +21,6 @@ function formatDateTimeToMySQL(date) {
          `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
-// Change to `true` if your DB columns are DATETIME
 const USE_DATETIME = false;
 function formatDate(date) {
   return USE_DATETIME ? formatDateTimeToMySQL(date) : formatDateToMySQL(date);
@@ -31,8 +30,10 @@ function formatDate(date) {
 router.get('/categories', auth, admin, async (_req, res, next) => {
   try {
     const [rows] = await pool.query('SELECT id, name, description, image FROM categories ORDER BY name');
+    console.log('Categories response:', rows); // Debug log
     res.json(rows);
   } catch (err) {
+    console.error('Categories error:', err); // Debug log
     next(err);
   }
 });
@@ -41,8 +42,10 @@ router.get('/categories', auth, admin, async (_req, res, next) => {
 router.get('/menu', auth, admin, async (_req, res, next) => {
   try {
     const [rows] = await pool.query('SELECT id, name FROM menu_items ORDER BY name');
+    console.log('Menu items response:', rows); // Debug log
     res.json(rows);
   } catch (err) {
+    console.error('Menu items error:', err);
     next(err);
   }
 });
@@ -56,8 +59,10 @@ router.get('/', auth, admin, async (_req, res, next) => {
       FROM coupons 
       ORDER BY id DESC
     `);
+    console.log('Coupons response:', rows); // Debug log
     res.json(rows);
   } catch (err) {
+    console.error('Coupons error:', err);
     next(err);
   }
 });
@@ -70,13 +75,11 @@ router.post('/', auth, admin, async (req, res, next) => {
       category_id, menu_item_id, image, start_date, end_date
     } = req.body;
 
-    // Validate required fields
     if (!code) return res.status(400).json({ message: 'Coupon code is required' });
     if (!['FIRST_ORDER', 'PERCENT', 'BUY_X', 'BUY_X_GET_Y'].includes(type)) {
       return res.status(400).json({ message: 'Invalid coupon type' });
     }
 
-    // Type-specific validations
     if (['FIRST_ORDER', 'PERCENT', 'BUY_X'].includes(type)) {
       if (discount === undefined || discount === null || isNaN(discount) || discount < 0) {
         return res.status(400).json({ message: 'Valid discount percentage required' });
@@ -105,11 +108,9 @@ router.post('/', auth, admin, async (req, res, next) => {
       return res.status(400).json({ message: 'End date must be after start date' });
     }
 
-    // Check for duplicate code
     const [existing] = await pool.query('SELECT id FROM coupons WHERE code = ?', [code]);
     if (existing.length > 0) return res.status(400).json({ message: 'Coupon code already exists' });
 
-    // Insert coupon
     const [result] = await pool.query(
       `INSERT INTO coupons (
         code, description, type, discount, min_qty, buy_qty, free_qty, 
@@ -131,15 +132,16 @@ router.post('/', auth, admin, async (req, res, next) => {
       ]
     );
 
-    // Fetch and return the created coupon
     const [newCoupon] = await pool.query(
       `SELECT id, code, description, type, discount, min_qty, buy_qty, free_qty, 
               category_id, menu_item_id, image_url AS image, start_date, end_date
        FROM coupons WHERE id = ?`,
       [result.insertId]
     );
+    console.log('Created coupon:', newCoupon[0]); // Debug log
     res.status(201).json(newCoupon[0]);
   } catch (err) {
+    console.error('Create coupon error:', err);
     next(err);
   }
 });
@@ -152,13 +154,11 @@ router.put('/:id', auth, admin, async (req, res, next) => {
       category_id, menu_item_id, image, start_date, end_date
     } = req.body;
 
-    // Validate required fields
     if (!code) return res.status(400).json({ message: 'Coupon code is required' });
     if (!['FIRST_ORDER', 'PERCENT', 'BUY_X', 'BUY_X_GET_Y'].includes(type)) {
       return res.status(400).json({ message: 'Invalid coupon type' });
     }
 
-    // Type-specific validations
     if (['FIRST_ORDER', 'PERCENT', 'BUY_X'].includes(type)) {
       if (discount === undefined || discount === null || isNaN(discount) || discount < 0) {
         return res.status(400).json({ message: 'Valid discount percentage required' });
@@ -187,11 +187,9 @@ router.put('/:id', auth, admin, async (req, res, next) => {
       return res.status(400).json({ message: 'End date must be after start date' });
     }
 
-    // Check for duplicate code
     const [existing] = await pool.query('SELECT id FROM coupons WHERE code = ? AND id != ?', [code, req.params.id]);
     if (existing.length > 0) return res.status(400).json({ message: 'Coupon code already exists' });
 
-    // Update coupon
     const [result] = await pool.query(
       `UPDATE coupons SET
         code = ?, description = ?, type = ?, discount = ?, min_qty = ?, buy_qty = ?, free_qty = ?, 
@@ -216,15 +214,16 @@ router.put('/:id', auth, admin, async (req, res, next) => {
 
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Coupon not found' });
 
-    // Fetch and return the updated coupon
     const [updatedCoupon] = await pool.query(
       `SELECT id, code, description, type, discount, min_qty, buy_qty, free_qty, 
               category_id, menu_item_id, image_url AS image, start_date, end_date
        FROM coupons WHERE id = ?`,
       [req.params.id]
     );
+    console.log('Updated coupon:', updatedCoupon[0]); // Debug log
     res.json(updatedCoupon[0]);
   } catch (err) {
+    console.error('Update coupon error:', err);
     next(err);
   }
 });
@@ -236,8 +235,10 @@ router.delete('/:id', auth, admin, async (req, res, next) => {
 
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Coupon not found' });
 
+    console.log('Deleted coupon ID:', req.params.id); // Debug log
     res.json({ message: 'Coupon deleted' });
   } catch (err) {
+    console.error('Delete coupon error:', err);
     next(err);
   }
 });
