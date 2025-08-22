@@ -19,7 +19,6 @@ router.use(verifyToken);
 
 /** ----------------------- HELPERS ----------------------- */
 const toInt = (v) => {
-  if (v === null || v === undefined || v === '') return NaN;
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : NaN;
 };
@@ -55,17 +54,16 @@ async function getCartSummary(userId, couponCode) {
     menu_item_id: item.menu_item_id,
     name: item.name,
     quantity: item.quantity,
-    price: Number(item.price || 0),
+    price: parseFloat(item.price || 0).toFixed(2),
     image_url: item.image_url?.startsWith('/')
       ? `http://192.168.1.4:3000${item.image_url}`
       : item.image_url || null,
-    total_price: Number(item.total_price || 0),
+    total_price: parseFloat(item.total_price || 0).toFixed(2),
     category_id: item.category_id ? Number(item.category_id) : null,
   }));
 
   const subtotal = formattedItems.reduce((sum, i) => sum + Number(i.total_price), 0);
 
-  // ✅ Coupon logic unchanged (your code was good)
   let coupon = null;
   let discount = 0;
   const code = (couponCode || '').trim().toUpperCase();
@@ -91,6 +89,7 @@ async function getCartSummary(userId, couponCode) {
         buy_qty: c.buy_qty ? Number(c.buy_qty) : null,
         free_qty: c.free_qty ? Number(c.free_qty) : null,
       };
+      console.log(`[cart.js] Coupon found:`, coupon);
 
       const totalQty = formattedItems.reduce((sum, i) => sum + i.quantity, 0);
       const categoryQty = {};
@@ -98,6 +97,7 @@ async function getCartSummary(userId, couponCode) {
         const cat = i.category_id ? Number(i.category_id) : null;
         if (cat) categoryQty[cat] = (categoryQty[cat] || 0) + i.quantity;
       });
+      console.log(`[cart.js] Category quantities for ${code}:`, categoryQty);
 
       switch (c.type) {
         case 'PERCENT':
@@ -107,10 +107,14 @@ async function getCartSummary(userId, couponCode) {
           if (c.category_id) {
             const catQty = categoryQty[c.category_id] || 0;
             if (catQty >= c.min_qty) discount = Number(c.discount) || 0;
-            else coupon = null;
+            else {
+              console.log(`[cart.js] BUY_X failed: ${catQty} < ${c.min_qty} for category_id ${c.category_id}`);
+              coupon = null;
+            }
           } else if (totalQty >= c.min_qty) {
             discount = Number(c.discount) || 0;
           } else {
+            console.log(`[cart.js] BUY_X failed: ${totalQty} < ${c.min_qty}`);
             coupon = null;
           }
           break;
@@ -120,13 +124,17 @@ async function getCartSummary(userId, couponCode) {
             [userId]
           );
           if (cnt === 0) discount = Number(c.discount) || 0;
-          else coupon = null;
+          else {
+            console.log(`[cart.js] FIRST_ORDER failed: User ${userId} has ${cnt} orders`);
+            coupon = null;
+          }
           break;
         case 'DATE_RANGE':
           discount = Number(c.discount) || 0;
           break;
         case 'BUY_X_GET_Y':
           if (!c.buy_qty || !c.free_qty) {
+            console.log(`[cart.js] BUY_X_GET_Y failed: Invalid buy_qty or free_qty`);
             coupon = null;
             break;
           }
@@ -136,6 +144,7 @@ async function getCartSummary(userId, couponCode) {
           }
           const qtyInCat = eligibleItems.reduce((sum, i) => sum + i.quantity, 0);
           if (qtyInCat < c.buy_qty) {
+            console.log(`[cart.js] BUY_X_GET_Y failed: ${qtyInCat} < ${c.buy_qty} for category_id ${c.category_id || 'cart'}`);
             coupon = null;
             break;
           }
@@ -146,8 +155,11 @@ async function getCartSummary(userId, couponCode) {
           discount = Number((offerGroups * c.free_qty * cheapestPrice).toFixed(2));
           break;
         default:
+          console.log(`[cart.js] Unknown coupon type: ${c.type}`);
           coupon = null;
       }
+    } else {
+      console.log(`[cart.js] Coupon not found: ${code}`);
     }
   }
 
@@ -166,9 +178,8 @@ async function getCartSummary(userId, couponCode) {
 /** ----------------------- ROUTES ----------------------- */
 
 // Add or update cart item
-router.post('/', async (req, res) => {
+router.post('/', async (req, res, next) => {
   try {
-    console.log('[cart.js] Incoming payload:', req.body);
     const userId = req.user.id;
     const itemId = toInt(req.body.menu_item_id);
     const qty = toInt(req.body.quantity ?? 1);
@@ -179,6 +190,7 @@ router.post('/', async (req, res) => {
 
     const menuItem = await ensureMenuItemExists(itemId);
     if (!menuItem) {
+      console.error(`[cart.js] Menu item not found: menu_item_id=${itemId}, name=${menuItem?.name || 'unknown'}`);
       return res.status(404).json({ error: 'Menu item not found' });
     }
 
@@ -216,8 +228,8 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Update quantity or remove
-async function updateItem(req, res) {
+// Change / remove quantity
+async function updateItem(req, res, next) {
   try {
     const userId = req.user.id;
     const itemId = toInt(req.params.itemId);
@@ -241,6 +253,7 @@ async function updateItem(req, res) {
 
     const menuItem = await ensureMenuItemExists(itemId);
     if (!menuItem) {
+      console.error(`[cart.js] Menu item not found: menu_item_id=${itemId}, name=${menuItem?.name || 'unknown'}`);
       return res.status(404).json({ error: 'Menu item not found' });
     }
 
@@ -278,7 +291,7 @@ router.patch('/:itemId', updateItem);
 router.put('/:itemId', updateItem);
 
 // Delete cart item
-router.delete('/:itemId', async (req, res) => {
+router.delete('/:itemId', async (req, res, next) => {
   try {
     const userId = req.user.id;
     const itemId = toInt(req.params.itemId);
@@ -300,10 +313,13 @@ router.delete('/:itemId', async (req, res) => {
 });
 
 // Clear entire cart
-router.delete('/', async (req, res) => {
+router.delete('/', async (req, res, next) => {
   try {
     const userId = req.user.id;
-    await pool.query(`DELETE FROM cart_items WHERE user_id = ?`, [userId]);
+    await pool.query(
+      `DELETE FROM cart_items WHERE user_id = ?`,
+      [userId]
+    );
     const summary = await getCartSummary(userId, req.query?.coupon);
     return res.json({ ok: true, cart: summary });
   } catch (err) {
@@ -313,9 +329,10 @@ router.delete('/', async (req, res) => {
 });
 
 // Get full cart
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
   try {
     const summary = await getCartSummary(req.user.id, req.query.coupon);
+    console.log(`[cart.js] Cart summary for user ${req.user.id}:`, summary);
     return res.json(summary);
   } catch (err) {
     console.error('[cart.js] Fetch error:', err);
