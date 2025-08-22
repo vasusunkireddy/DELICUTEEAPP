@@ -41,6 +41,7 @@ router.get('/admin', async (_req, res) => {
       })
     );
 
+    console.log(`Fetched ${withItems.length} orders`); // Debug log
     res.json(withItems);
   } catch (err) {
     console.error('Admin orders fetch error →', err.message);
@@ -147,6 +148,12 @@ router.get('/generate-qr/:orderId', async (req, res) => {
   const { orderId } = req.params;
   console.log(`Received QR code request for orderId=${orderId}`); // Debug log
   try {
+    // Validate orderId
+    if (!Number.isInteger(Number(orderId))) {
+      console.log(`Invalid orderId: ${orderId}`);
+      return res.status(400).json({ message: 'Invalid order ID' });
+    }
+
     // Fetch order details
     const [[order]] = await pool.query(
       `SELECT id, total FROM orders WHERE id = ?`,
