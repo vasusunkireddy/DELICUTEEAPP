@@ -5,6 +5,16 @@ const { sendOrderStatusEmail } = require('../../utils/mailer');
 
 const router = express.Router();
 
+// Test database connection on startup
+pool.query('SELECT 1')
+  .then(() => console.log('Database connection successful'))
+  .catch(err => console.error('Database connection error:', err));
+
+// Test query to verify orders
+pool.query('SELECT id, total FROM orders WHERE id IN (36, 50)')
+  .then(([rows]) => console.log('Test query result:', rows))
+  .catch(err => console.error('Test query error:', err));
+
 /* ═══════════════════════════════════════════════════════════
    GET /api/orders/admin – Admin order list
    ═══════════════════════════════════════════════════════════ */
@@ -41,11 +51,11 @@ router.get('/admin', async (_req, res) => {
       })
     );
 
-    console.log(`Fetched ${withItems.length} orders`); // Debug log
+    console.log(`Fetched ${withItems.length} orders:`, withItems.map(o => ({ id: o.id, total: o.total })));
     res.json(withItems);
   } catch (err) {
     console.error('Admin orders fetch error →', err.message);
-    res.status(500).json({ message: 'Failed to load orders' });
+    res.status(500).json({ message: 'Failed to load orders', error: err.message });
   }
 });
 
@@ -114,7 +124,7 @@ router.patch('/admin/:id/status', async (req, res) => {
   } catch (err) {
     await conn.rollback();
     console.error('Admin status update error →', err.message);
-    res.status(500).json({ message: 'Failed to update status' });
+    res.status(500).json({ message: 'Failed to update status', error: err.message });
   } finally {
     conn.release();
   }
@@ -135,7 +145,7 @@ router.delete('/admin/:id', async (req, res) => {
   } catch (err) {
     await conn.rollback();
     console.error('Admin order delete error →', err.message);
-    res.status(500).json({ message: 'Failed to delete order' });
+    res.status(500).json({ message: 'Failed to delete order', error: err.message });
   } finally {
     conn.release();
   }
@@ -146,42 +156,47 @@ router.delete('/admin/:id', async (req, res) => {
    ═══════════════════════════════════════════════════════════ */
 router.get('/generate-qr/:orderId', async (req, res) => {
   const { orderId } = req.params;
-  console.log(`Received QR code request for orderId=${orderId}`); // Debug log
+  console.log(`Received QR code request for orderId=${orderId}`);
   try {
     // Validate orderId
-    if (!Number.isInteger(Number(orderId))) {
+    const orderIdNum = Number(orderId);
+    if (!Number.isInteger(orderIdNum)) {
       console.log(`Invalid orderId: ${orderId}`);
       return res.status(400).json({ message: 'Invalid order ID' });
     }
 
     // Fetch order details
-    const [[order]] = await pool.query(
+    console.log(`Querying orders table for id=${orderId}`);
+    const [rows] = await pool.query(
       `SELECT id, total FROM orders WHERE id = ?`,
-      [orderId]
+      [orderIdNum]
     );
+    console.log(`Query result:`, rows);
 
-    if (!order) {
+    if (!rows.length) {
       console.log(`Order not found: orderId=${orderId}`);
       return res.status(404).json({ message: 'Order not found' });
     }
 
+    const order = rows[0];
+
     // UPI Payment details
-    const upiId = '9652296548@ybl'; // Your correct UPI ID
-    const payeeName = encodeURIComponent('Delicute'); // Encode merchant name
-    const amount = Number(order.total).toFixed(2); // Ensure amount is a number with 2 decimal places
-    const txnNote = encodeURIComponent(`Order #${order.id}`); // Encode transaction note
+    const upiId = '9652296548@ybl';
+    const payeeName = encodeURIComponent('Delicute');
+    const amount = Number(order.total).toFixed(2);
+    const txnNote = encodeURIComponent(`Order #${order.id}`);
     const currency = 'INR';
 
     // Construct UPI payment URL
     const upiUrl = `upi://pay?pa=${upiId}&pn=${payeeName}&tn=${txnNote}&am=${amount}&cu=${currency}`;
-    console.log(`Generated UPI URL: ${upiUrl}`); // Debug log
+    console.log(`Generated UPI URL: ${upiUrl}`);
 
     // Generate QR as Data URL
     const qrDataUrl = await QRCode.toDataURL(upiUrl, {
-      errorCorrectionLevel: 'H', // High error correction for robustness
+      errorCorrectionLevel: 'H',
       type: 'image/png',
       margin: 2,
-      scale: 8, // Increase scale for better readability
+      scale: 8,
     });
 
     // Convert Data URL to image response
@@ -192,8 +207,8 @@ router.get('/generate-qr/:orderId', async (req, res) => {
     });
     res.end(img);
   } catch (err) {
-    console.error('QR generation error →', err.message);
-    res.status(500).json({ message: 'Failed to generate QR code' });
+    console.error('QR generation error →', err.message, err.stack);
+    res.status(500).json({ message: 'Failed to generate QR code', error: err.message });
   }
 });
 
