@@ -145,6 +145,7 @@ router.delete('/admin/:id', async (req, res) => {
    ═══════════════════════════════════════════════════════════ */
 router.get('/generate-qr/:orderId', async (req, res) => {
   const { orderId } = req.params;
+  console.log(`Received QR code request for orderId=${orderId}`); // Debug log
   try {
     // Fetch order details
     const [[order]] = await pool.query(
@@ -152,10 +153,13 @@ router.get('/generate-qr/:orderId', async (req, res) => {
       [orderId]
     );
 
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    if (!order) {
+      console.log(`Order not found: orderId=${orderId}`);
+      return res.status(404).json({ message: 'Order not found' });
+    }
 
     // UPI Payment details
-    const upiId = '9652296548@ybl'; // Correct UPI ID
+    const upiId = '9652296548@ybl'; // Your correct UPI ID
     const payeeName = encodeURIComponent('Delicute'); // Encode merchant name
     const amount = Number(order.total).toFixed(2); // Ensure amount is a number with 2 decimal places
     const txnNote = encodeURIComponent(`Order #${order.id}`); // Encode transaction note
@@ -163,6 +167,7 @@ router.get('/generate-qr/:orderId', async (req, res) => {
 
     // Construct UPI payment URL
     const upiUrl = `upi://pay?pa=${upiId}&pn=${payeeName}&tn=${txnNote}&am=${amount}&cu=${currency}`;
+    console.log(`Generated UPI URL: ${upiUrl}`); // Debug log
 
     // Generate QR as Data URL
     const qrDataUrl = await QRCode.toDataURL(upiUrl, {
