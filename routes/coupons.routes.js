@@ -26,14 +26,24 @@ function formatDate(date) {
   return USE_DATETIME ? formatDateTimeToMySQL(date) : formatDateToMySQL(date);
 }
 
+/* ─── Error Handler Middleware ─── */
+router.use((err, _req, res, _next) => {
+  console.error('API error:', err);
+  res.status(500).json({ message: 'Internal server error', error: err.message });
+});
+
 /* ─── ADMIN: Get all categories ─── */
 router.get('/categories', auth, admin, async (_req, res, next) => {
   try {
     const [rows] = await pool.query('SELECT id, name, description, image FROM categories ORDER BY name');
-    console.log('Categories response:', rows); // Debug log
+    console.log('Categories response:', rows);
+    if (!rows.length) {
+      console.log('No categories found');
+      return res.json([]); // Return empty array if no categories
+    }
     res.json(rows);
   } catch (err) {
-    console.error('Categories error:', err); // Debug log
+    console.error('Categories error:', err);
     next(err);
   }
 });
@@ -42,7 +52,7 @@ router.get('/categories', auth, admin, async (_req, res, next) => {
 router.get('/menu', auth, admin, async (_req, res, next) => {
   try {
     const [rows] = await pool.query('SELECT id, name FROM menu_items ORDER BY name');
-    console.log('Menu items response:', rows); // Debug log
+    console.log('Menu items response:', rows);
     res.json(rows);
   } catch (err) {
     console.error('Menu items error:', err);
@@ -59,7 +69,7 @@ router.get('/', auth, admin, async (_req, res, next) => {
       FROM coupons 
       ORDER BY id DESC
     `);
-    console.log('Coupons response:', rows); // Debug log
+    console.log('Coupons response:', rows);
     res.json(rows);
   } catch (err) {
     console.error('Coupons error:', err);
@@ -138,7 +148,7 @@ router.post('/', auth, admin, async (req, res, next) => {
        FROM coupons WHERE id = ?`,
       [result.insertId]
     );
-    console.log('Created coupon:', newCoupon[0]); // Debug log
+    console.log('Created coupon:', newCoupon[0]);
     res.status(201).json(newCoupon[0]);
   } catch (err) {
     console.error('Create coupon error:', err);
@@ -220,7 +230,7 @@ router.put('/:id', auth, admin, async (req, res, next) => {
        FROM coupons WHERE id = ?`,
       [req.params.id]
     );
-    console.log('Updated coupon:', updatedCoupon[0]); // Debug log
+    console.log('Updated coupon:', updatedCoupon[0]);
     res.json(updatedCoupon[0]);
   } catch (err) {
     console.error('Update coupon error:', err);
@@ -235,7 +245,7 @@ router.delete('/:id', auth, admin, async (req, res, next) => {
 
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Coupon not found' });
 
-    console.log('Deleted coupon ID:', req.params.id); // Debug log
+    console.log('Deleted coupon ID:', req.params.id);
     res.json({ message: 'Coupon deleted' });
   } catch (err) {
     console.error('Delete coupon error:', err);
