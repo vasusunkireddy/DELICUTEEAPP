@@ -48,17 +48,17 @@ router.get('/user/:userId', async (req, res) => {
          o.rating,
          JSON_ARRAYAGG(
            JSON_OBJECT(
-             'menu_item_id', oi.menu_item_id,
+             'menu_item_id', COALESCE(oi.product_id, oi.id),
              'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
-             'image_url', COALESCE(oi.image_url, mi.image_url, ''),
-             'is_available', mi.is_active
+             'image_url', COALESCE(oi.image, mi.image_url, ''),
+             'is_available', COALESCE(mi.available, 1)
            )
          ) AS items
        FROM orders o
        LEFT JOIN order_items oi ON o.id = oi.order_id
-       LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+       LEFT JOIN menu_items mi ON COALESCE(oi.product_id, oi.id) = mi.id
        WHERE o.user_id = ?
        GROUP BY o.id, o.status, o.total, o.created_at, o.rating
        ORDER BY o.created_at DESC`,
@@ -78,12 +78,13 @@ router.get('/user/:userId', async (req, res) => {
         image_url: item.image_url && item.image_url.startsWith('/') 
           ? `${baseUrl}${item.image_url}` 
           : item.image_url || '',
-        is_available: item.is_available !== undefined ? item.is_available : true // Default to true if unavailable
+        is_available: item.is_available !== undefined ? Boolean(item.is_available) : true // Default to true if unavailable
       })) : [],
       total: toFloat(order.total, 0),
       rating: toInt(order.rating),
     }));
 
+    console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`);
     return res.json(normalizedOrders);
   } catch (err) {
     console.error('[orders] GET /user/:userId error:', err);
@@ -105,7 +106,7 @@ router.get('/menu/:menuItemId', async (req, res) => {
          name,
          price,
          image_url,
-         is_active
+         available AS is_active
        FROM menu_items 
        WHERE id = ? LIMIT 1`,
       [menuItemId]
