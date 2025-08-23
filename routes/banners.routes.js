@@ -4,6 +4,9 @@ const dayjs = require('dayjs');
 const sanitizeHtml = require('sanitize-html');
 const pool = require('../db');
 const cloudinary = require('cloudinary').v2;
+const sharp = require('sharp');
+const ffmpeg = require('fluent-ffmpeg');
+const { Readable } = require('stream');
 
 const router = express.Router();
 
@@ -17,15 +20,18 @@ cloudinary.config({
 /* ── Multer: Store in memory, limit file size ── */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // Increased to 10MB for videos
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB for videos
   fileFilter: (req, file, cb) => {
-    // Accept images and MP4 videos
     if (!file.mimetype.match(/^(image\/|video\/mp4)/)) {
       return cb(new Error('Only image or MP4 video files are allowed'), false);
     }
     cb(null, true);
   },
 });
+
+/* ── Banner Dimensions (based on client width ~390px) ── */
+const TARGET_WIDTH = 366; // width - 24
+const TARGET_HEIGHT = 220; // (width - 24) * 0.6
 
 /* ── Helpers ── */
 const clean = (s) =>
@@ -64,6 +70,43 @@ const validateBanner = (title, desc, startDate, endDate, url, mediaType) => {
   }
 };
 
+/* ── Process Image with Sharp ── */
+const processImage = async (buffer) => {
+  return await sharp(buffer)
+    .resize({
+      width: TARGET_WIDTH,
+      height: TARGET_HEIGHT,
+      fit: 'cover',
+      position: 'center',
+    })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+};
+
+/* ── Process Video with FFmpeg ── */
+const processVideo = (buffer) => {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const stream = new Readable();
+    stream.push(buffer);
+    stream.push(null);
+
+    ffmpeg(stream)
+      .outputOptions([
+        `-vf scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
+        '-c:v libx264',
+        '-c:a aac',
+        '-b:v 2000k',
+        '-r 30',
+      ])
+      .toFormat('mp4')
+      .on('error', (err) => reject(err))
+      .on('end', () => resolve(Buffer.concat(chunks)))
+      .pipe()
+      .on('data', (chunk) => chunks.push(chunk));
+  });
+};
+
 /* ── CREATE ── */
 router.post('/', upload.single('media'), async (req, res) => {
   try {
@@ -73,16 +116,22 @@ router.post('/', upload.single('media'), async (req, res) => {
     const startDate = toMySQLDate(req.body.startDate);
     const endDate = toMySQLDate(req.body.endDate);
     const active = bool01(req.body.active, 1);
-    const mediaType = req.body.mediaType || 'image'; // Default to image if not specified
+    const mediaType = req.body.mediaType || 'image';
 
-    // Validate inputs
     validateBanner(title, desc, startDate, endDate, url, mediaType);
     if (!req.file) {
       return res.status(400).json({ message: 'Media file is required' });
     }
 
-    // Determine resource type for Cloudinary
     const resourceType = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
+    let processedBuffer = req.file.buffer;
+
+    // Process media
+    if (resourceType === 'image') {
+      processedBuffer = await processImage(req.file.buffer);
+    } else {
+      processedBuffer = await processVideo(req.file.buffer);
+    }
 
     // Upload to Cloudinary
     const result = await new Promise((resolve, reject) => {
@@ -93,7 +142,7 @@ router.post('/', upload.single('media'), async (req, res) => {
           else resolve(result);
         }
       );
-      stream.end(req.file.buffer);
+      stream.end(processedBuffer);
     });
 
     const mediaUrl = result.secure_url;
@@ -134,10 +183,10 @@ router.get('/', async (_req, res) => {
       id: b.id,
       title: b.title,
       desc: b.desc,
-      description: b.desc, // For frontend compatibility
+      description: b.desc,
       url: b.url,
       mediaUrl: b.mediaUrl,
-      mediaType: b.mediaType || 'image', // Default to image for backward compatibility
+      mediaType: b.mediaType || 'image',
       startDate: b.startDate,
       endDate: b.endDate,
       active: !!b.active,
@@ -173,13 +222,11 @@ router.put('/:id', upload.single('media'), async (req, res) => {
       return res.status(400).json({ message: 'Invalid banner ID' });
     }
 
-    // Check if banner exists
     const [[existing]] = await pool.query('SELECT * FROM banners WHERE id = ?', [id]);
     if (!existing) {
       return res.status(404).json({ message: 'Banner not found' });
     }
 
-    // Get and validate fields
     const title = req.body.title != null ? clean(req.body.title) : existing.title;
     const desc = req.body.desc != null ? clean(req.body.desc || req.body.description) : existing.desc;
     const url = req.body.url != null ? clean(req.body.url) : existing.url;
@@ -193,9 +240,16 @@ router.put('/:id', upload.single('media'), async (req, res) => {
     let mediaUrl = existing.mediaUrl;
     let publicId = existing.media_public_id;
 
-    // Handle new media upload
     if (req.file) {
       const resourceType = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
+      let processedBuffer = req.file.buffer;
+
+      if (resourceType === 'image') {
+        processedBuffer = await processImage(req.file.buffer);
+      } else {
+        processedBuffer = await processVideo(req.file.buffer);
+      }
+
       const result = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           { folder: 'delicute/banners', resource_type: resourceType },
@@ -204,13 +258,12 @@ router.put('/:id', upload.single('media'), async (req, res) => {
             else resolve(result);
           }
         );
-        stream.end(req.file.buffer);
+        stream.end(processedBuffer);
       });
 
       mediaUrl = result.secure_url;
       publicId = result.public_id;
 
-      // Delete old media from Cloudinary (best-effort)
       if (existing.media_public_id) {
         try {
           await cloudinary.uploader.destroy(existing.media_public_id, {
@@ -222,7 +275,6 @@ router.put('/:id', upload.single('media'), async (req, res) => {
       }
     }
 
-    // Update database
     const [dbResult] = await pool.query(
       `UPDATE banners
        SET title = ?, \`desc\` = ?, mediaUrl = ?, media_public_id = ?, mediaType = ?, url = ?, startDate = ?, endDate = ?, active = ?
@@ -262,19 +314,16 @@ router.delete('/:id', async (req, res) => {
       return res.status(400).json({ message: 'Invalid banner ID' });
     }
 
-    // Check if banner exists
     const [[existing]] = await pool.query('SELECT media_public_id, mediaType FROM banners WHERE id = ?', [id]);
     if (!existing) {
       return res.status(404).json({ message: 'Banner not found' });
     }
 
-    // Delete from database
     const [dbResult] = await pool.query('DELETE FROM banners WHERE id = ?', [id]);
     if (dbResult.affectedRows === 0) {
       return res.status(404).json({ message: 'Banner not found' });
     }
 
-    // Delete from Cloudinary (best-effort)
     if (existing.media_public_id) {
       try {
         await cloudinary.uploader.destroy(existing.media_public_id, {
