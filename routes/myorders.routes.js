@@ -52,7 +52,8 @@ router.get('/user/:userId', async (req, res) => {
              'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
-             'image_url', COALESCE(oi.image_url, mi.image_url, '')
+             'image_url', COALESCE(oi.image_url, mi.image_url, ''),
+             'is_available', mi.is_active
            )
          ) AS items
        FROM orders o
@@ -70,9 +71,14 @@ router.get('/user/:userId', async (req, res) => {
       ...order,
       items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
         ...item,
+        menu_item_id: toInt(item.menu_item_id, 0),
+        quantity: toInt(item.quantity, 1),
+        price: toFloat(item.price, 0),
+        name: item.name || 'Unknown Item',
         image_url: item.image_url && item.image_url.startsWith('/') 
           ? `${baseUrl}${item.image_url}` 
-          : item.image_url || ''
+          : item.image_url || '',
+        is_available: item.is_available !== undefined ? item.is_available : true // Default to true if unavailable
       })) : [],
       total: toFloat(order.total, 0),
       rating: toInt(order.rating),
@@ -81,6 +87,51 @@ router.get('/user/:userId', async (req, res) => {
     return res.json(normalizedOrders);
   } catch (err) {
     console.error('[orders] GET /user/:userId error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/* ------------------------ GET /menu/:menuItemId ------------------------ */
+router.get('/menu/:menuItemId', async (req, res) => {
+  try {
+    const menuItemId = toInt(req.params.menuItemId);
+    if (!menuItemId || menuItemId <= 0) {
+      return res.status(400).json({ error: 'Invalid menu item ID' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT 
+         id,
+         name,
+         price,
+         image_url,
+         is_active
+       FROM menu_items 
+       WHERE id = ? LIMIT 1`,
+      [menuItemId]
+    );
+
+    if (!rows.length) {
+      console.warn(`[orders] GET /menu/:menuItemId - Menu item ${menuItemId} not found`);
+      return res.status(404).json({ error: 'Menu item not found' });
+    }
+
+    const item = rows[0];
+    const baseUrl = 'https://delicuteeapp.onrender.com';
+    const normalizedItem = {
+      id: toInt(item.id, 0),
+      name: item.name || 'Unknown Item',
+      price: toFloat(item.price, 0),
+      image_url: item.image_url && item.image_url.startsWith('/')
+        ? `${baseUrl}${item.image_url}`
+        : item.image_url || '',
+      is_active: item.is_active === 1 // Ensure boolean-like response
+    };
+
+    console.log(`[orders] GET /menu/:menuItemId - Fetched item ${menuItemId}:`, normalizedItem);
+    return res.json(normalizedItem);
+  } catch (err) {
+    console.error('[orders] GET /menu/:menuItemId error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -135,6 +186,7 @@ router.patch('/:orderId/cancel', async (req, res) => {
       );
       await conn.commit();
       conn.release();
+      console.log(`[orders] PATCH /:orderId/cancel - Order ${orderId} cancelled successfully`);
       return res.json({ ok: true });
     } catch (e) {
       await conn.rollback();
@@ -189,6 +241,7 @@ router.post('/:orderId/rate', async (req, res) => {
       [rating, orderId, req.user.id]
     );
 
+    console.log(`[orders] POST /:orderId/rate - Order ${orderId} rated ${rating} successfully`);
     return res.json({ ok: true });
   } catch (err) {
     console.error('[orders] POST /:orderId/rate error:', err);
