@@ -15,6 +15,7 @@ function verifyToken(req, res, next) {
     req.user = { id: payload.id, role: payload.role };
     next();
   } catch (e) {
+    console.error('[orders] Invalid token:', e.message);
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
@@ -84,8 +85,10 @@ router.get('/user/:userId', async (req, res) => {
       rating: toInt(order.rating),
     }));
 
-    console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`);
-    return res.json(normalizedOrders);
+    console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
+      orders: normalizedOrders.map(o => ({ id: o.id, itemCount: o.items.length }))
+    });
+    return res.status(200).json(normalizedOrders);
   } catch (err) {
     console.error('[orders] GET /user/:userId error:', err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -97,6 +100,7 @@ router.get('/menu/:menuItemId', async (req, res) => {
   try {
     const menuItemId = toInt(req.params.menuItemId);
     if (!menuItemId || menuItemId <= 0) {
+      console.warn(`[orders] GET /menu/:menuItemId - Invalid menu item ID: ${req.params.menuItemId}`);
       return res.status(400).json({ error: 'Invalid menu item ID' });
     }
 
@@ -114,7 +118,7 @@ router.get('/menu/:menuItemId', async (req, res) => {
 
     if (!rows.length) {
       console.warn(`[orders] GET /menu/:menuItemId - Menu item ${menuItemId} not found`);
-      return res.status(404).json({ error: 'Menu item not found' });
+      return res.status(404).json({ error: 'Menu item not found', menuItemId });
     }
 
     const item = rows[0];
@@ -130,10 +134,10 @@ router.get('/menu/:menuItemId', async (req, res) => {
     };
 
     console.log(`[orders] GET /menu/:menuItemId - Fetched item ${menuItemId}:`, normalizedItem);
-    return res.json(normalizedItem);
+    res.status(200).json(normalizedItem);
   } catch (err) {
     console.error('[orders] GET /menu/:menuItemId error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 
@@ -188,7 +192,7 @@ router.patch('/:orderId/cancel', async (req, res) => {
       await conn.commit();
       conn.release();
       console.log(`[orders] PATCH /:orderId/cancel - Order ${orderId} cancelled successfully`);
-      return res.json({ ok: true });
+      return res.status(200).json({ ok: true });
     } catch (e) {
       await conn.rollback();
       conn.release();
@@ -243,7 +247,7 @@ router.post('/:orderId/rate', async (req, res) => {
     );
 
     console.log(`[orders] POST /:orderId/rate - Order ${orderId} rated ${rating} successfully`);
-    return res.json({ ok: true });
+    return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[orders] POST /:orderId/rate error:', err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -253,7 +257,7 @@ router.post('/:orderId/rate', async (req, res) => {
 /* ------------------------ Global Error Handler ------------------------ */
 router.use((err, req, res, next) => {
   console.error('[orders] Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
 module.exports = router;
