@@ -49,7 +49,7 @@ router.get('/user/:userId', async (req, res) => {
          o.rating,
          JSON_ARRAYAGG(
            JSON_OBJECT(
-             'menu_item_id', COALESCE(oi.product_id, oi.id),
+             'menu_item_id', COALESCE(mi.id, oi.id),
              'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
@@ -59,7 +59,7 @@ router.get('/user/:userId', async (req, res) => {
          ) AS items
        FROM orders o
        LEFT JOIN order_items oi ON o.id = oi.order_id
-       LEFT JOIN menu_items mi ON COALESCE(oi.product_id, oi.id) = mi.id
+       LEFT JOIN menu_items mi ON oi.name = mi.name
        WHERE o.user_id = ?
        GROUP BY o.id, o.status, o.total, o.created_at, o.rating
        ORDER BY o.created_at DESC`,
@@ -79,19 +79,20 @@ router.get('/user/:userId', async (req, res) => {
         image_url: item.image_url && item.image_url.startsWith('/') 
           ? `${baseUrl}${item.image_url}` 
           : item.image_url || '',
-        is_available: item.is_available !== undefined ? Boolean(item.is_available) : true // Default to true if unavailable
+        is_available: item.is_available !== undefined ? Boolean(item.is_available) : true
       })) : [],
       total: toFloat(order.total, 0),
       rating: toInt(order.rating),
     }));
 
     console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
-      orders: normalizedOrders.map(o => ({ id: o.id, itemCount: o.items.length }))
+      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ menu_item_id: i.menu_item_id, name: i.name, is_available: i.is_available })) }))
     });
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).json(normalizedOrders);
   } catch (err) {
     console.error('[orders] GET /user/:userId error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 
@@ -130,11 +131,12 @@ router.get('/menu/:menuItemId', async (req, res) => {
       image_url: item.image_url && item.image_url.startsWith('/')
         ? `${baseUrl}${item.image_url}`
         : item.image_url || '',
-      is_active: item.is_active === 1 // Ensure boolean-like response
+      is_active: item.is_active === 1
     };
 
     console.log(`[orders] GET /menu/:menuItemId - Fetched item ${menuItemId}:`, normalizedItem);
-    res.status(200).json(normalizedItem);
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(200).json(normalizedItem);
   } catch (err) {
     console.error('[orders] GET /menu/:menuItemId error:', err);
     res.status(500).json({ error: 'Internal server error', details: err.message });
@@ -200,7 +202,7 @@ router.patch('/:orderId/cancel', async (req, res) => {
     }
   } catch (err) {
     console.error('[orders] PATCH /:orderId/cancel error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 
@@ -250,7 +252,7 @@ router.post('/:orderId/rate', async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[orders] POST /:orderId/rate error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 
