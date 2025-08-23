@@ -7,7 +7,8 @@ const cloudinary = require('cloudinary').v2;
 const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 const { Readable } = require('stream');
-const ffprobe = require('fluent-ffmpeg').ffprobe;
+const path = require('path');
+const fs = require('fs');
 
 const router = express.Router();
 
@@ -18,33 +19,18 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-/* ── Multer: Store in memory, limit file size, enhanced validation ── */
+/* ── Multer: Store in memory, limit file size, basic validation ── */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB for videos
-  fileFilter: async (req, file, cb) => {
-    if (!file.mimetype.match(/^(image\/|video\/mp4)/)) {
-      return cb(new Error('Only image or MP4 video files are allowed'), false);
-    }
-    if (file.mimetype.startsWith('video/')) {
-      try {
-        // Validate video using ffprobe
-        await new Promise((resolve, reject) => {
-          ffprobe(Readable.from(file.buffer), (err, metadata) => {
-            if (err || !metadata.streams.some(s => s.codec_type === 'video')) {
-              reject(new Error('Invalid or corrupted video file'));
-            } else {
-              resolve();
-            }
-          });
-        });
-        cb(null, true);
-      } catch (err) {
-        console.error('Video validation error:', err.message);
-        cb(new Error('Invalid or corrupted video file'), false);
-      }
-    } else {
+  limits: { fileSize: 50 * 1024 * 1024 }, // up to 50MB for videos
+  fileFilter: (req, file, cb) => {
+    if (
+      file.mimetype.startsWith('image/') ||
+      file.mimetype === 'video/mp4'
+    ) {
       cb(null, true);
+    } else {
+      cb(new Error('Only image or MP4 video files are allowed'), false);
     }
   },
 });
@@ -114,16 +100,15 @@ const processVideo = (buffer) => {
     if (!buffer || buffer.length === 0) {
       return reject(new Error('Video buffer is empty or invalid'));
     }
-    console.log(`Processing video, buffer size: ${buffer.length} bytes`);
-    const chunks = [];
-    const stream = new Readable({
-      read() {
-        this.push(buffer);
-        this.push(null);
-      },
-    });
 
-    ffmpeg(stream)
+    console.log(`Processing video, buffer size: ${buffer.length} bytes`);
+    const inputPath = path.join(__dirname, `tmp-${Date.now()}.mp4`);
+    const outputPath = path.join(__dirname, `out-${Date.now()}.mp4`);
+
+    // Write buffer to tmp file
+    fs.writeFileSync(inputPath, buffer);
+
+    ffmpeg(inputPath)
       .outputOptions([
         `-vf scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
         '-c:v libx264',
@@ -132,17 +117,19 @@ const processVideo = (buffer) => {
         '-r 30',
       ])
       .toFormat('mp4')
-      .on('start', (cmd) => console.log(`FFmpeg command: ${cmd}`))
       .on('error', (err) => {
         console.error('FFmpeg processing error:', err);
+        fs.unlinkSync(inputPath);
         reject(new Error(`Video processing failed: ${err.message}`));
       })
       .on('end', () => {
         console.log('Video processing completed');
-        resolve(Buffer.concat(chunks));
+        const processedBuffer = fs.readFileSync(outputPath);
+        fs.unlinkSync(inputPath);
+        fs.unlinkSync(outputPath);
+        resolve(processedBuffer);
       })
-      .pipe()
-      .on('data', (chunk) => chunks.push(chunk));
+      .save(outputPath);
   });
 };
 
@@ -162,12 +149,9 @@ router.post('/', upload.single('media'), async (req, res) => {
       return res.status(400).json({ message: 'Media file is required' });
     }
 
-    console.log(`Uploading ${mediaType}, MIME: ${req.file.mimetype}, Size: ${req.file.buffer.length} bytes`);
-
     const resourceType = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
-    let processedBuffer = req.file.buffer;
+    let processedBuffer;
 
-    // Process media
     if (resourceType === 'image') {
       processedBuffer = await processImage(req.file.buffer);
     } else {
@@ -210,9 +194,7 @@ router.post('/', upload.single('media'), async (req, res) => {
     });
   } catch (e) {
     console.error('POST /banners error:', e);
-    res.status(e.message.includes('Only image or MP4 video files') || e.message.includes('Invalid') || e.message.includes('Video processing failed') ? 400 : 500).json({
-      message: e.message || 'Failed to create banner',
-    });
+    res.status(400).json({ message: e.message || 'Failed to create banner' });
   }
 });
 
@@ -282,9 +264,8 @@ router.put('/:id', upload.single('media'), async (req, res) => {
     let publicId = existing.media_public_id;
 
     if (req.file) {
-      console.log(`Updating banner ${id}, ${mediaType}, MIME: ${req.file.mimetype}, Size: ${req.file.buffer.length} bytes`);
       const resourceType = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
-      let processedBuffer = req.file.buffer;
+      let processedBuffer;
 
       if (resourceType === 'image') {
         processedBuffer = await processImage(req.file.buffer);
@@ -342,9 +323,7 @@ router.put('/:id', upload.single('media'), async (req, res) => {
     });
   } catch (e) {
     console.error('PUT /banners/:id error:', e);
-    res.status(e.message.includes('Only image or MP4 video files') || e.message.includes('Invalid') || e.message.includes('Video processing failed') ? 400 : 500).json({
-      message: e.message || 'Failed to update banner',
-    });
+    res.status(400).json({ message: e.message || 'Failed to update banner' });
   }
 });
 
