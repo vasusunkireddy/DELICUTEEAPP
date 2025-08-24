@@ -1,59 +1,53 @@
+// utils/mailer.js
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
 /**
- * Configure transporter with Gmail SMTP
+ * Create a transporter.
+ * For Gmail:
+ * - Turn on 2-Step Verification
+ * - Create an App Password
+ * - Put it in MAIL_PASS
  */
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST || "smtp.gmail.com",
   port: Number(process.env.MAIL_PORT || 465),
-  secure: true,
+  secure: true, // SSL
   auth: {
     user: process.env.MAIL_USER,
     pass: process.env.MAIL_PASS,
   },
 });
 
-// Health check
+// Quick health check
 transporter.verify().then(
   () => console.log("✅ Mailer ready"),
   (err) => console.warn("⚠️ Mailer not ready:", err?.message)
 );
 
 /**
- * ✅ Send OTP Email (valid for 10 minutes)
+ * Send OTP email (10-minute validity)
  */
 async function sendOtpEmail(to, otp) {
   if (!to || !otp) throw new Error("sendOtpEmail: missing to/otp");
 
-  const subject = "Your Delicute Login OTP";
-
-  const text = `Dear User,\n\nYour OTP for login is: ${otp}\nThis code is valid for 10 minutes. Do not share it with anyone.\n\nIf you did not request this, please ignore this message.\n\nRegards,\nTeam Delicute`;
-
   const html = `
-  <!DOCTYPE html>
-  <html>
-    <body style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #000; background: #fff; padding: 20px;">
-      <div style="max-width: 600px; margin: 0 auto;">
-        <h2 style="margin-bottom: 15px;">Delicute Login OTP</h2>
-        <p>Dear User,</p>
-        <p>Your OTP for login is:</p>
-        <p style="font-size: 22px; font-weight: bold; letter-spacing: 4px; margin: 20px 0;">${otp}</p>
-        <p>This OTP is valid for 10 minutes. Do not share it with anyone.</p>
-        <p>If you did not request this, please ignore this message.</p>
-        <p style="margin-top: 30px;">Regards,<br/>Team Delicute</p>
-        <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;" />
-        <p style="font-size: 12px; color: #555;">You are receiving this email because you requested a login OTP on Delicute.</p>
-      </div>
-    </body>
-  </html>
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#000">
+      <p>Dear User,</p>
+      <p>Your Delicute OTP for login is:</p>
+      <p style="font-weight:700;font-size:20px;letter-spacing:4px;margin:10px 0;">${otp}</p>
+      <p>This OTP is valid for 10 minutes. Do not share it with anyone.</p>
+      <p>If you did not request this, please ignore this message.</p>
+      <p>Sincerely,<br/>Team Delicute</p>
+      <hr style="border:none;border-top:1px solid #ccc"/>
+      <small>You are receiving this email because you requested a login OTP on Delicute.</small>
+    </div>
   `;
 
   const info = await transporter.sendMail({
     from: `Delicute <${process.env.MAIL_USER}>`,
     to,
-    subject,
-    text,
+    subject: "Delicute Login OTP",
     html,
   });
 
@@ -62,7 +56,7 @@ async function sendOtpEmail(to, otp) {
 }
 
 /**
- * ✅ Send Order Status Email (Delivered, Cancelled, Shipped, Processing)
+ * Send order status email (plain and professional)
  */
 async function sendOrderStatusEmail({ to, name, orderId, status, reason }) {
   if (!to || !orderId || !status) {
@@ -71,45 +65,35 @@ async function sendOrderStatusEmail({ to, name, orderId, status, reason }) {
 
   const subject = `Delicute Order #${orderId} - Status Update`;
 
-  // Define messages for each status
   const statusMessage = {
-    Delivered: `Your order #${orderId} has been successfully delivered.`,
+    Delivered: `We are pleased to inform you that your order #${orderId} has been successfully delivered.`,
     Cancelled: `We regret to inform you that your order #${orderId} has been cancelled.`,
     Processing: `Your order #${orderId} is currently being processed.`,
-    Shipped: `Your order #${orderId} has been shipped and is on its way.`,
+    Shipped: `Your order #${orderId} has been shipped and is on the way.`,
   };
 
   const messageBody = statusMessage[status] || `Your order #${orderId} status has been updated to ${status}.`;
 
-  const text = `Dear ${name || "Customer"},\n\n${messageBody}\n${reason ? `Note: ${reason}\n` : ""}\nThank you for choosing Delicute.\n\nRegards,\nTeam Delicute`;
-
   const html = `
-  <!DOCTYPE html>
-  <html>
-    <body style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #000; background: #fff; padding: 20px;">
-      <div style="max-width: 600px; margin: 0 auto;">
-        <h2 style="margin-bottom: 15px;">Order Update - #${orderId}</h2>
-        <p>Dear ${name || "Customer"},</p>
-        <p>${messageBody}</p>
-        ${reason ? `<p><strong>Note:</strong> ${reason}</p>` : ""}
-        <p>Thank you for choosing Delicute. We appreciate your trust and look forward to serving you again.</p>
-        <p style="margin-top: 30px;">Regards,<br/>Team Delicute</p>
-        <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;" />
-        <p style="font-size: 12px; color: #555;">You are receiving this email because you placed an order on Delicute.</p>
-      </div>
-    </body>
-  </html>
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#000">
+      <p>Dear ${name || "Customer"},</p>
+      <p>${messageBody}</p>
+      ${reason ? `<p><b>Note:</b> ${reason}</p>` : ""}
+      <p>Thank you for choosing Delicute. We value your trust and look forward to serving you again.</p>
+      <p>Sincerely,<br/>Team Delicute</p>
+      <hr style="border:none;border-top:1px solid #ccc"/>
+      <small>You are receiving this email because you placed an order on Delicute.</small>
+    </div>
   `;
 
   const info = await transporter.sendMail({
     from: `Delicute <${process.env.MAIL_USER}>`,
     to,
     subject,
-    text,
     html,
   });
 
-  console.log("✅ Order status email sent:", info.messageId);
+  console.log("✅ Status email sent:", info.messageId);
   return info;
 }
 
