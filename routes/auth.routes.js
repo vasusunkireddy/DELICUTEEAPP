@@ -233,7 +233,7 @@ router.post("/save-phone", async (req, res) => {
 
     // 🔒 Different phone but already set → block
     if (current && current !== rawPhone) {
-      return res.status(409).json({ message: "Phone already set and locked for this account" });
+      return res.status(409).json({ message: "Please check your MobileNumber" });
     }
 
     // 🔐 Global uniqueness
