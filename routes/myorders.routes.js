@@ -1,7 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
-const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
 
@@ -33,33 +32,6 @@ function toFloat(val, def = null) {
   return Number.isFinite(n) ? n : def;
 }
 
-/* ------------------------ GET /menu-items ------------------------ */
-router.get('/menu-items', async (req, res) => {
-  try {
-    const [menuItems] = await pool.query(
-      `SELECT id, name, price, image_url, available 
-       FROM menu_items 
-       WHERE available = 1`
-    );
-
-    const baseUrl = 'https://delicuteeapp.onrender.com';
-    const normalizedItems = menuItems.map(item => ({
-      product_id: toInt(item.id),
-      name: item.name || 'Unknown Item',
-      price: toFloat(item.price, 0),
-      image_url: item.image_url || '',
-      available: item.available === 1
-    }));
-
-    console.log(`[orders] GET /menu-items - Fetched ${normalizedItems.length} available menu items`);
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    return res.status(200).json(normalizedItems);
-  } catch (err) {
-    console.error('[orders] GET /menu-items error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
-});
-
 /* ------------------------ GET /customer-orders/user/:userId ------------------------ */
 router.get('/user/:userId', async (req, res) => {
   try {
@@ -71,57 +43,50 @@ router.get('/user/:userId', async (req, res) => {
     const [orders] = await pool.query(
       `SELECT 
          o.id, 
-         o.orderUid, 
          o.status, 
          o.total, 
          o.created_at, 
-         o.rating, 
-         o.address, 
-         o.payment_method, 
-         o.payment_status, 
-         o.payment_id, 
+         o.rating,
          JSON_ARRAYAGG(
            JSON_OBJECT(
-             'product_id', COALESCE(oi.product_id, mi.id, 0),
+             'menu_item_id', COALESCE(mi.id, oi.id),
              'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
-             'image_url', COALESCE(oi.image, mi.image_url, '')
+             'image_url', COALESCE(oi.image, mi.image_url, ''),
+             'is_available', COALESCE(mi.available, 1)
            )
          ) AS items
        FROM orders o
        LEFT JOIN order_items oi ON o.id = oi.order_id
        LEFT JOIN menu_items mi ON oi.name = mi.name
        WHERE o.user_id = ?
-       GROUP BY o.id, o.orderUid, o.status, o.total, o.created_at, o.rating, o.address, o.payment_method, o.payment_status, o.payment_id
+       GROUP BY o.id, o.status, o.total, o.created_at, o.rating
        ORDER BY o.created_at DESC`,
       [userId]
     );
 
+    // Normalize response to ensure items is always an array and image_url is absolute
     const baseUrl = 'https://delicuteeapp.onrender.com';
     const normalizedOrders = orders.map(order => ({
       ...order,
-      orderUid: order.orderUid || null,
       items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
         ...item,
-        product_id: toInt(item.product_id, 0),
+        menu_item_id: toInt(item.menu_item_id, 0),
         quantity: toInt(item.quantity, 1),
         price: toFloat(item.price, 0),
         name: item.name || 'Unknown Item',
         image_url: item.image_url && item.image_url.startsWith('/') 
           ? `${baseUrl}${item.image_url}` 
-          : item.image_url || ''
+          : item.image_url || '',
+        is_available: item.is_available !== undefined ? Boolean(item.is_available) : true
       })) : [],
       total: toFloat(order.total, 0),
-      rating: toInt(order.rating, null),
-      address: order.address || '',
-      payment_method: order.payment_method || 'COD',
-      payment_status: order.payment_status || 'UNPAID',
-      payment_id: order.payment_id || null
+      rating: toInt(order.rating),
     }));
 
     console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
-      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ product_id: i.product_id, name: i.name })) }))
+      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ menu_item_id: i.menu_item_id, name: i.name, is_available: i.is_available })) }))
     });
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).json(normalizedOrders);
@@ -131,98 +96,50 @@ router.get('/user/:userId', async (req, res) => {
   }
 });
 
-/* ------------------------ POST /customer-orders ------------------------ */
-router.post('/', async (req, res) => {
+/* ------------------------ GET /menu/:menuItemId ------------------------ */
+router.get('/menu/:menuItemId', async (req, res) => {
   try {
-    const { user_id, address, total, status, payment_method, payment_status, payment_id } = req.body;
-    const userId = toInt(user_id);
-    const orderTotal = toFloat(total, 0);
-    const orderStatus = (status || 'Pending').toLowerCase();
-    const orderAddress = (address || '').trim();
-    const orderPaymentMethod = (payment_method || 'COD').trim();
-    const orderPaymentStatus = (payment_status || 'UNPAID').toUpperCase();
-    const orderPaymentId = payment_id || null;
-    const orderUid = uuidv4();
-
-    if (!userId || userId <= 0 || userId !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to create order' });
-    }
-    if (!orderAddress) {
-      return res.status(400).json({ error: 'Address is required' });
-    }
-    if (orderTotal <= 0) {
-      return res.status(400).json({ error: 'Invalid order total' });
-    }
-    if (!['pending', 'processing', 'confirmed', 'shipped', 'delivered', 'cancelled'].includes(orderStatus)) {
-      return res.status(400).json({ error: 'Invalid order status' });
-    }
-    if (!['COD', 'online'].includes(orderPaymentMethod.toLowerCase())) {
-      return res.status(400).json({ error: 'Invalid payment method' });
-    }
-    if (!['UNPAID', 'PAID', 'SUCCESS'].includes(orderPaymentStatus)) {
-      return res.status(400).json({ error: 'Invalid payment status' });
+    const menuItemId = toInt(req.params.menuItemId);
+    if (!menuItemId || menuItemId <= 0) {
+      console.warn(`[orders] GET /menu/:menuItemId - Invalid menu item ID: ${req.params.menuItemId}`);
+      return res.status(400).json({ error: 'Invalid menu item ID' });
     }
 
-    const [result] = await pool.query(
-      `INSERT INTO orders (orderUid, user_id, address, total, status, payment_method, payment_status, payment_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderUid, userId, orderAddress, orderTotal, orderStatus, orderPaymentMethod, orderPaymentStatus, orderPaymentId]
+    const [rows] = await pool.query(
+      `SELECT 
+         id,
+         name,
+         price,
+         image_url,
+         available AS is_active
+       FROM menu_items 
+       WHERE id = ? LIMIT 1`,
+      [menuItemId]
     );
 
-    console.log(`[orders] POST / - Created order ${result.insertId} for user ${userId}`);
-    return res.status(201).json({ id: result.insertId, orderUid, ok: true });
+    if (!rows.length) {
+      console.warn(`[orders] GET /menu/:menuItemId - Menu item ${menuItemId} not found`);
+      return res.status(404).json({ error: 'Menu item not found', menuItemId });
+    }
+
+    const item = rows[0];
+    const baseUrl = 'https://delicuteeapp.onrender.com';
+    const normalizedItem = {
+      id: toInt(item.id, 0),
+      name: item.name || 'Unknown Item',
+      price: toFloat(item.price, 0),
+      image_url: item.image_url && item.image_url.startsWith('/')
+        ? `${baseUrl}${item.image_url}`
+        : item.image_url || '',
+      is_active: item.is_active === 1
+    };
+
+    console.log(`[orders] GET /menu/:menuItemId - Fetched item ${menuItemId}:`, normalizedItem);
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(200).json(normalizedItem);
   } catch (err) {
-    console.error('[orders] POST / error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
-});
-
-/* ------------------------ POST /order-items ------------------------ */
-router.post('/order-items', async (req, res) => {
-  try {
-    const { order_id, product_id, name, qty, price, image } = req.body;
-    const orderId = toInt(order_id);
-    const productId = toInt(product_id);
-    const quantity = toInt(qty, 1);
-    const itemPrice = toFloat(price, 0);
-    const itemName = (name || '').trim();
-    const itemImage = (image || '').trim();
-
-    if (!orderId || orderId <= 0) {
-      return res.status(400).json({ error: 'Invalid order ID' });
-    }
-    if (!productId || productId <= 0) {
-      return res.status(400).json({ error: 'Invalid product ID' });
-    }
-    if (!itemName) {
-      return res.status(400).json({ error: 'Item name is required' });
-    }
-    if (quantity <= 0) {
-      return res.status(400).json({ error: 'Invalid quantity' });
-    }
-    if (itemPrice <= 0) {
-      return res.status(400).json({ error: 'Invalid price' });
-    }
-
-    const [orderRows] = await pool.query(
-      `SELECT user_id FROM orders WHERE id = ? LIMIT 1`,
-      [orderId]
-    );
-    if (!orderRows.length || orderRows[0].user_id !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to add items to this order' });
-    }
-
-    await pool.query(
-      `INSERT INTO order_items (order_id, product_id, name, qty, price, image)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [orderId, productId, itemName, quantity, itemPrice, itemImage]
-    );
-
-    console.log(`[orders] POST /order-items - Added item ${itemName} to order ${orderId}`);
-    return res.status(201).json({ ok: true });
-  } catch (err) {
-    console.error('[orders] POST /order-items error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
+    console.error('[orders] GET /menu/:menuItemId error:', err);
+    res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 
@@ -335,141 +252,6 @@ router.post('/:orderId/rate', async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[orders] POST /:orderId/rate error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
-});
-
-/* ------------------------ POST /customer-orders/:orderId/reorder ------------------------ */
-router.post('/:orderId/reorder', async (req, res) => {
-  try {
-    const orderId = toInt(req.params.orderId);
-    if (!orderId || orderId <= 0) {
-      return res.status(400).json({ error: 'Invalid order ID' });
-    }
-
-    // Fetch original order details
-    const [orderRows] = await pool.query(
-      `SELECT user_id, address, payment_method, payment_status, payment_id
-       FROM orders 
-       WHERE id = ? LIMIT 1`,
-      [orderId]
-    );
-
-    if (!orderRows.length) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-
-    const order = orderRows[0];
-    if (order.user_id !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to reorder this order' });
-    }
-
-    // Fetch order items
-    const [orderItems] = await pool.query(
-      `SELECT name, qty, price, image
-       FROM order_items 
-       WHERE order_id = ?`,
-      [orderId]
-    );
-
-    if (!orderItems.length) {
-      return res.status(400).json({ error: 'No items found in the order' });
-    }
-
-    // Check item availability and price updates
-    const unavailableItems = [];
-    const priceChanges = [];
-    let newTotal = 0;
-
-    const validatedItems = [];
-    for (const item of orderItems) {
-      const [menuItemRows] = await pool.query(
-        `SELECT id, name, price, image_url, available 
-         FROM menu_items 
-         WHERE name = ? AND available = 1 LIMIT 1`,
-        [item.name]
-      );
-
-      if (!menuItemRows.length) {
-        unavailableItems.push(item.name);
-        continue;
-      }
-
-      const menuItem = menuItemRows[0];
-      if (menuItem.price !== item.price) {
-        priceChanges.push({
-          name: item.name,
-          old_price: item.price,
-          new_price: menuItem.price
-        });
-      }
-
-      newTotal += menuItem.price * item.qty;
-      validatedItems.push({
-        product_id: menuItem.id,
-        name: menuItem.name,
-        qty: item.qty,
-        price: menuItem.price,
-        image: menuItem.image_url || item.image || ''
-      });
-    }
-
-    if (unavailableItems.length > 0) {
-      return res.status(400).json({
-        error: 'Some items are unavailable',
-        unavailable_items: unavailableItems
-      });
-    }
-
-    // Create new order in a transaction
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-
-      // Insert new order
-      const orderUid = uuidv4();
-      const [orderResult] = await conn.query(
-        `INSERT INTO orders (orderUid, user_id, address, total, status, payment_method, payment_status, payment_id, created_at)
-         VALUES (?, ?, ?, ?, 'Pending', ?, ?, ?, NOW())`,
-        [orderUid, req.user.id, order.address, newTotal, order.payment_method, order.payment_status, order.payment_id]
-      );
-
-      const newOrderId = orderResult.insertId;
-
-      // Insert order items
-      for (const item of validatedItems) {
-        await conn.query(
-          `INSERT INTO order_items (order_id, product_id, name, qty, price, image)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [newOrderId, item.product_id, item.name, item.qty, item.price, item.image]
-        );
-      }
-
-      await conn.commit();
-      conn.release();
-
-      console.log(`[orders] POST /:orderId/reorder - Order ${orderId} reordered as new order ${newOrderId} for user ${req.user.id}`);
-      return res.status(201).json({
-        ok: true,
-        new_order_id: newOrderId,
-        orderUid,
-        total: newTotal,
-        price_changes: priceChanges,
-        items: validatedItems.map(item => ({
-          product_id: item.product_id,
-          name: item.name,
-          quantity: item.qty,
-          price: item.price,
-          image_url: item.image
-        }))
-      });
-    } catch (e) {
-      await conn.rollback();
-      conn.release();
-      throw e;
-    }
-  } catch (err) {
-    console.error('[orders] POST /:orderId/reorder error:', err);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });

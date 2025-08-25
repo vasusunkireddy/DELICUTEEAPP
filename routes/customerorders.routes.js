@@ -1,5 +1,6 @@
 const express = require('express');
 const pool = require('../db');
+const { notifyNewOrder } = require('../app'); // Import notifyNewOrder from app.js
 
 const router = express.Router();
 
@@ -90,6 +91,7 @@ router.post('/', async (req, res) => {
     );
 
     await conn.commit();
+    await notifyNewOrder(orderId); // Notify admins of new order
     res.status(201).json({ success: true, orderId });
   } catch (err) {
     await conn.rollback();
@@ -328,7 +330,7 @@ router.post('/:id/reorder', async (req, res) => {
       [values]
     );
 
-    // 7) Generate orderUid (simple UUID-like string for simplicity)
+    // 7) Generate orderUid
     const orderUid = `ORD-${newOrderId}-${Date.now().toString(36)}`;
 
     await conn.query(
@@ -337,6 +339,9 @@ router.post('/:id/reorder', async (req, res) => {
     );
 
     await conn.commit();
+
+    // 8) Notify admins of new order
+    await notifyNewOrder(newOrderId);
 
     res.status(201).json({
       ok: true,
