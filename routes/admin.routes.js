@@ -43,14 +43,14 @@ router.get('/stats', auth, admin, async (req, res, next) => {
       'SELECT AVG(total) as avg FROM orders'
     );
 
-    // Last 7 days orders
+    // Last 7 days orders (fixed for ONLY_FULL_GROUP_BY)
     const sevenDaysAgo = today.subtract(7, 'day').startOf('day').format('YYYY-MM-DD HH:mm:ss');
     const [last7DaysResult] = await connection.query(
       `SELECT DATE_FORMAT(created_at, '%Y-%m-%d') as day, COUNT(*) as orders 
        FROM orders 
        WHERE created_at >= ? 
-       GROUP BY DATE(created_at) 
-       ORDER BY day DESC`,
+       GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d')
+       ORDER BY DATE_FORMAT(created_at, '%Y-%m-%d') DESC`,
       [sevenDaysAgo]
     );
 
@@ -79,9 +79,9 @@ router.get('/latest-orders', auth, admin, async (req, res, next) => {
   try {
     const connection = await pool.getConnection();
 
-    // Fetch latest 10 orders, join with users to get customer name
+    // Fetch latest 10 orders, join with users to get customer name (use username instead of name)
     const [orders] = await connection.query(
-      `SELECT o.id, COALESCE(o.customer_name, u.name, 'Unknown') as customer_name, o.total, o.status
+      `SELECT o.id, COALESCE(o.customer_name, u.username, 'Unknown') as customer_name, o.total, o.status
        FROM orders o
        LEFT JOIN users u ON o.user_id = u.id
        ORDER BY o.created_at DESC
