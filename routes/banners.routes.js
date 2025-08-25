@@ -6,9 +6,10 @@ const pool = require('../db');
 const cloudinary = require('cloudinary').v2;
 const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
+const ffprobe = require('fluent-ffmpeg').ffprobe;
 const { Readable } = require('stream');
 const path = require('path');
-const fs = require('fs');
+const fs = require('fs').promises;
 
 const router = express.Router();
 
@@ -22,22 +23,24 @@ cloudinary.config({
 /* ── Multer: Store in memory, limit file size, basic validation ── */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // up to 50MB for videos
+  limits: { fileSize: 100 * 1024 * 1024 }, // Increased to 100MB for HD videos
   fileFilter: (req, file, cb) => {
-    if (
-      file.mimetype.startsWith('image/') ||
-      file.mimetype === 'video/mp4'
-    ) {
+    const validImageTypes = ['image/jpeg', 'image/png'];
+    const validVideoTypes = ['video/mp4'];
+    if (validImageTypes.includes(file.mimetype) || validVideoTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Only image or MP4 video files are allowed'), false);
+      cb(new Error('Only JPEG, PNG images, or MP4 videos are allowed'), false);
     }
   },
 });
 
-/* ── Banner Dimensions (based on client width ~390px) ── */
-const TARGET_WIDTH = 366; // width - 24
-const TARGET_HEIGHT = 220; // (width - 24) * 0.6
+/* ── Constants ── */
+const MIN_WIDTH = 1920; // Minimum HD width
+const MIN_HEIGHT = 1080; // Minimum HD height
+const TARGET_ASPECT_RATIO = 16 / 9;
+const THUMBNAIL_WIDTH = 366; // For admin dashboard previews
+const THUMBNAIL_HEIGHT = 220;
 
 /* ── Helpers ── */
 const clean = (s) =>
@@ -76,61 +79,96 @@ const validateBanner = (title, desc, startDate, endDate, url, mediaType) => {
   }
 };
 
-/* ── Process Image with Sharp ── */
-const processImage = async (buffer) => {
+/* ── Validate Image Resolution and Aspect Ratio ── */
+const validateImage = async (buffer) => {
+  try {
+    const metadata = await sharp(buffer).metadata();
+    if (metadata.width < MIN_WIDTH || metadata.height < MIN_HEIGHT) {
+      throw new Error(`Image resolution must be at least ${MIN_WIDTH}x${MIN_HEIGHT}`);
+    }
+    const aspectRatio = metadata.width / metadata.height;
+    if (Math.abs(aspectRatio - TARGET_ASPECT_RATIO) > 0.1) {
+      throw new Error('Image must have a 16:9 aspect ratio');
+    }
+    return metadata;
+  } catch (err) {
+    throw new Error(`Image validation failed: ${err.message}`);
+  }
+};
+
+/* ── Validate Video Resolution and Aspect Ratio ── */
+const validateVideo = async (buffer) => {
+  try {
+    const tempPath = path.join(__dirname, `tmp-${Date.now()}.mp4`);
+    await fs.writeFile(tempPath, buffer);
+    const metadata = await new Promise((resolve, reject) => {
+      ffprobe(tempPath, (err, data) => {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+    await fs.unlink(tempPath);
+    const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+    if (!videoStream) {
+      throw new Error('No video stream found');
+    }
+    const { width, height } = videoStream;
+    if (width < MIN_WIDTH || height < MIN_HEIGHT) {
+      throw new Error(`Video resolution must be at least ${MIN_WIDTH}x${MIN_HEIGHT}`);
+    }
+    const aspectRatio = width / height;
+    if (Math.abs(aspectRatio - TARGET_ASPECT_RATIO) > 0.1) {
+      throw new Error('Video must have a 16:9 aspect ratio');
+    }
+    return { width, height };
+  } catch (err) {
+    throw new Error(`Video validation failed: ${err.message}`);
+  }
+};
+
+/* ── Create Thumbnail for Image ── */
+const createImageThumbnail = async (buffer) => {
   try {
     return await sharp(buffer)
       .resize({
-        width: TARGET_WIDTH,
-        height: TARGET_HEIGHT,
+        width: THUMBNAIL_WIDTH,
+        height: THUMBNAIL_HEIGHT,
         fit: 'cover',
         position: 'center',
       })
       .jpeg({ quality: 85 })
       .toBuffer();
   } catch (err) {
-    console.error('Image processing error:', err);
-    throw new Error('Failed to process image');
+    console.error('Image thumbnail creation error:', err);
+    throw new Error('Failed to create image thumbnail');
   }
 };
 
-/* ── Process Video with FFmpeg ── */
-const processVideo = (buffer) => {
-  return new Promise((resolve, reject) => {
-    if (!buffer || buffer.length === 0) {
-      return reject(new Error('Video buffer is empty or invalid'));
-    }
-
-    console.log(`Processing video, buffer size: ${buffer.length} bytes`);
-    const inputPath = path.join(__dirname, `tmp-${Date.now()}.mp4`);
-    const outputPath = path.join(__dirname, `out-${Date.now()}.mp4`);
-
-    // Write buffer to tmp file
-    fs.writeFileSync(inputPath, buffer);
-
-    ffmpeg(inputPath)
-      .outputOptions([
-        `-vf scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
-        '-c:v libx264',
-        '-c:a aac',
-        '-b:v 2000k',
-        '-r 30',
-      ])
-      .toFormat('mp4')
-      .on('error', (err) => {
-        console.error('FFmpeg processing error:', err);
-        fs.unlinkSync(inputPath);
-        reject(new Error(`Video processing failed: ${err.message}`));
-      })
-      .on('end', () => {
-        console.log('Video processing completed');
-        const processedBuffer = fs.readFileSync(outputPath);
-        fs.unlinkSync(inputPath);
-        fs.unlinkSync(outputPath);
-        resolve(processedBuffer);
-      })
-      .save(outputPath);
-  });
+/* ── Create Thumbnail for Video ── */
+const createVideoThumbnail = async (buffer) => {
+  try {
+    const tempInput = path.join(__dirname, `tmp-vid-${Date.now()}.mp4`);
+    const tempOutput = path.join(__dirname, `tmp-thumb-${Date.now()}.jpg`);
+    await fs.writeFile(tempInput, buffer);
+    await new Promise((resolve, reject) => {
+      ffmpeg(tempInput)
+        .screenshots({
+          count: 1,
+          folder: __dirname,
+          filename: path.basename(tempOutput),
+          size: `${THUMBNAIL_WIDTH}x${THUMBNAIL_HEIGHT}`,
+        })
+        .on('end', resolve)
+        .on('error', reject);
+    });
+    const thumbnailBuffer = await fs.readFile(tempOutput);
+    await fs.unlink(tempInput);
+    await fs.unlink(tempOutput);
+    return thumbnailBuffer;
+  } catch (err) {
+    console.error('Video thumbnail creation error:', err);
+    throw new Error('Failed to create video thumbnail');
+  }
 };
 
 /* ── CREATE ── */
@@ -150,16 +188,10 @@ router.post('/', upload.single('media'), async (req, res) => {
     }
 
     const resourceType = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
-    let processedBuffer;
+    await (resourceType === 'image' ? validateImage : validateVideo)(req.file.buffer);
 
-    if (resourceType === 'image') {
-      processedBuffer = await processImage(req.file.buffer);
-    } else {
-      processedBuffer = await processVideo(req.file.buffer);
-    }
-
-    // Upload to Cloudinary
-    const result = await new Promise((resolve, reject) => {
+    // Upload original media to Cloudinary
+    const uploadResult = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         { folder: 'delicute/banners', resource_type: resourceType },
         (error, result) => {
@@ -167,17 +199,34 @@ router.post('/', upload.single('media'), async (req, res) => {
           else resolve(result);
         }
       );
-      stream.end(processedBuffer);
+      Readable.from(req.file.buffer).pipe(stream);
     });
 
-    const mediaUrl = result.secure_url;
-    const publicId = result.public_id;
+    // Create and upload thumbnail
+    const thumbnailBuffer = await (resourceType === 'image'
+      ? createImageThumbnail(req.file.buffer)
+      : createVideoThumbnail(req.file.buffer));
+    const thumbnailResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: 'delicute/banners/thumbnails', resource_type: 'image' },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      Readable.from(thumbnailBuffer).pipe(stream);
+    });
+
+    const mediaUrl = uploadResult.secure_url;
+    const mediaPublicId = uploadResult.public_id;
+    const thumbnailUrl = thumbnailResult.secure_url;
+    const thumbnailPublicId = thumbnailResult.public_id;
 
     // Insert into database
     const [dbResult] = await pool.query(
-      `INSERT INTO banners (title, \`desc\`, mediaUrl, media_public_id, mediaType, url, startDate, endDate, active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [title, desc, mediaUrl, publicId, mediaType, url, startDate, endDate, active]
+      `INSERT INTO banners (title, \`desc\`, mediaUrl, media_public_id, thumbnailUrl, thumbnail_public_id, mediaType, url, startDate, endDate, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [title, desc, mediaUrl, mediaPublicId, thumbnailUrl, thumbnailPublicId, mediaType, url, startDate, endDate, active]
     );
 
     res.status(201).json({
@@ -187,6 +236,7 @@ router.post('/', upload.single('media'), async (req, res) => {
       desc,
       url,
       mediaUrl,
+      thumbnailUrl,
       mediaType,
       startDate,
       endDate,
@@ -209,6 +259,7 @@ router.get('/', async (_req, res) => {
       description: b.desc,
       url: b.url,
       mediaUrl: b.mediaUrl,
+      thumbnailUrl: b.thumbnailUrl,
       mediaType: b.mediaType || 'image',
       startDate: b.startDate,
       endDate: b.endDate,
@@ -225,7 +276,7 @@ router.get('/', async (_req, res) => {
 router.get('/active', async (_req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT id, title, \`desc\` AS description, mediaUrl, mediaType, url, startDate, endDate, active
+      `SELECT id, title, \`desc\` AS description, mediaUrl, thumbnailUrl, mediaType, url, startDate, endDate, active
        FROM banners
        WHERE active = 1 AND NOW() >= startDate AND NOW() <= endDate
        ORDER BY startDate DESC`
@@ -261,19 +312,15 @@ router.put('/:id', upload.single('media'), async (req, res) => {
     validateBanner(title, desc, startDate, endDate, url, mediaType);
 
     let mediaUrl = existing.mediaUrl;
-    let publicId = existing.media_public_id;
+    let mediaPublicId = existing.media_public_id;
+    let thumbnailUrl = existing.thumbnailUrl;
+    let thumbnailPublicId = existing.thumbnail_public_id;
 
     if (req.file) {
       const resourceType = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
-      let processedBuffer;
+      await (resourceType === 'image' ? validateImage : validateVideo)(req.file.buffer);
 
-      if (resourceType === 'image') {
-        processedBuffer = await processImage(req.file.buffer);
-      } else {
-        processedBuffer = await processVideo(req.file.buffer);
-      }
-
-      const result = await new Promise((resolve, reject) => {
+      const uploadResult = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           { folder: 'delicute/banners', resource_type: resourceType },
           (error, result) => {
@@ -281,11 +328,27 @@ router.put('/:id', upload.single('media'), async (req, res) => {
             else resolve(result);
           }
         );
-        stream.end(processedBuffer);
+        Readable.from(req.file.buffer).pipe(stream);
       });
 
-      mediaUrl = result.secure_url;
-      publicId = result.public_id;
+      const thumbnailBuffer = await (resourceType === 'image'
+        ? createImageThumbnail(req.file.buffer)
+        : createVideoThumbnail(req.file.buffer));
+      const thumbnailResult = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: 'delicute/banners/thumbnails', resource_type: 'image' },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        Readable.from(thumbnailBuffer).pipe(stream);
+      });
+
+      mediaUrl = uploadResult.secure_url;
+      mediaPublicId = uploadResult.public_id;
+      thumbnailUrl = thumbnailResult.secure_url;
+      thumbnailPublicId = thumbnailResult.public_id;
 
       if (existing.media_public_id) {
         try {
@@ -296,13 +359,22 @@ router.put('/:id', upload.single('media'), async (req, res) => {
           console.warn('Failed to delete old Cloudinary media:', e.message);
         }
       }
+      if (existing.thumbnail_public_id) {
+        try {
+          await cloudinary.uploader.destroy(existing.thumbnail_public_id, {
+            resource_type: 'image',
+          });
+        } catch (e) {
+          console.warn('Failed to delete old Cloudinary thumbnail:', e.message);
+        }
+      }
     }
 
     const [dbResult] = await pool.query(
       `UPDATE banners
-       SET title = ?, \`desc\` = ?, mediaUrl = ?, media_public_id = ?, mediaType = ?, url = ?, startDate = ?, endDate = ?, active = ?
+       SET title = ?, \`desc\` = ?, mediaUrl = ?, media_public_id = ?, thumbnailUrl = ?, thumbnail_public_id = ?, mediaType = ?, url = ?, startDate = ?, endDate = ?, active = ?
        WHERE id = ?`,
-      [title, desc, mediaUrl, publicId, mediaType, url, startDate, endDate, active, id]
+      [title, desc, mediaUrl, mediaPublicId, thumbnailUrl, thumbnailPublicId, mediaType, url, startDate, endDate, active, id]
     );
 
     if (dbResult.affectedRows === 0) {
@@ -316,6 +388,7 @@ router.put('/:id', upload.single('media'), async (req, res) => {
       desc,
       url,
       mediaUrl,
+      thumbnailUrl,
       mediaType,
       startDate,
       endDate,
@@ -335,7 +408,7 @@ router.delete('/:id', async (req, res) => {
       return res.status(400).json({ message: 'Invalid banner ID' });
     }
 
-    const [[existing]] = await pool.query('SELECT media_public_id, mediaType FROM banners WHERE id = ?', [id]);
+    const [[existing]] = await pool.query('SELECT media_public_id, thumbnail_public_id, mediaType FROM banners WHERE id = ?', [id]);
     if (!existing) {
       return res.status(404).json({ message: 'Banner not found' });
     }
@@ -352,6 +425,15 @@ router.delete('/:id', async (req, res) => {
         });
       } catch (e) {
         console.warn('Failed to delete Cloudinary media:', e.message);
+      }
+    }
+    if (existing.thumbnail_public_id) {
+      try {
+        await cloudinary.uploader.destroy(existing.thumbnail_public_id, {
+          resource_type: 'image',
+        });
+      } catch (e) {
+        console.warn('Failed to delete Cloudinary thumbnail:', e.message);
       }
     }
 
