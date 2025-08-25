@@ -1,6 +1,7 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
 
@@ -32,6 +33,33 @@ function toFloat(val, def = null) {
   return Number.isFinite(n) ? n : def;
 }
 
+/* ------------------------ GET /menu-items ------------------------ */
+router.get('/menu-items', async (req, res) => {
+  try {
+    const [menuItems] = await pool.query(
+      `SELECT id, name, price, image_url, available 
+       FROM menu_items 
+       WHERE available = 1`
+    );
+
+    const baseUrl = 'https://delicuteeapp.onrender.com';
+    const normalizedItems = menuItems.map(item => ({
+      product_id: toInt(item.id),
+      name: item.name || 'Unknown Item',
+      price: toFloat(item.price, 0),
+      image_url: item.image_url || '',
+      available: item.available === 1
+    }));
+
+    console.log(`[orders] GET /menu-items - Fetched ${normalizedItems.length} available menu items`);
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(200).json(normalizedItems);
+  } catch (err) {
+    console.error('[orders] GET /menu-items error:', err);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
 /* ------------------------ GET /customer-orders/user/:userId ------------------------ */
 router.get('/user/:userId', async (req, res) => {
   try {
@@ -43,15 +71,18 @@ router.get('/user/:userId', async (req, res) => {
     const [orders] = await pool.query(
       `SELECT 
          o.id, 
+         o.orderUid, 
          o.status, 
          o.total, 
          o.created_at, 
-         o.rating,
-         o.address,
-         o.payment_method,
+         o.rating, 
+         o.address, 
+         o.payment_method, 
+         o.payment_status, 
+         o.payment_id, 
          JSON_ARRAYAGG(
            JSON_OBJECT(
-             'menu_item_id', COALESCE(mi.id, oi.id),
+             'product_id', COALESCE(oi.product_id, mi.id, 0),
              'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
@@ -62,18 +93,18 @@ router.get('/user/:userId', async (req, res) => {
        LEFT JOIN order_items oi ON o.id = oi.order_id
        LEFT JOIN menu_items mi ON oi.name = mi.name
        WHERE o.user_id = ?
-       GROUP BY o.id, o.status, o.total, o.created_at, o.rating, o.address, o.payment_method
+       GROUP BY o.id, o.orderUid, o.status, o.total, o.created_at, o.rating, o.address, o.payment_method, o.payment_status, o.payment_id
        ORDER BY o.created_at DESC`,
       [userId]
     );
 
-    // Normalize response to ensure items is always an array and image_url is absolute
     const baseUrl = 'https://delicuteeapp.onrender.com';
     const normalizedOrders = orders.map(order => ({
       ...order,
+      orderUid: order.orderUid || null,
       items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
         ...item,
-        menu_item_id: toInt(item.menu_item_id, 0),
+        product_id: toInt(item.product_id, 0),
         quantity: toInt(item.quantity, 1),
         price: toFloat(item.price, 0),
         name: item.name || 'Unknown Item',
@@ -82,13 +113,15 @@ router.get('/user/:userId', async (req, res) => {
           : item.image_url || ''
       })) : [],
       total: toFloat(order.total, 0),
-      rating: toInt(order.rating),
+      rating: toInt(order.rating, null),
       address: order.address || '',
-      payment_method: order.payment_method || 'COD'
+      payment_method: order.payment_method || 'COD',
+      payment_status: order.payment_status || 'UNPAID',
+      payment_id: order.payment_id || null
     }));
 
     console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
-      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ menu_item_id: i.menu_item_id, name: i.name })) }))
+      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ product_id: i.product_id, name: i.name })) }))
     });
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).json(normalizedOrders);
@@ -101,12 +134,15 @@ router.get('/user/:userId', async (req, res) => {
 /* ------------------------ POST /customer-orders ------------------------ */
 router.post('/', async (req, res) => {
   try {
-    const { user_id, address, total, status, payment_method } = req.body;
+    const { user_id, address, total, status, payment_method, payment_status, payment_id } = req.body;
     const userId = toInt(user_id);
     const orderTotal = toFloat(total, 0);
     const orderStatus = (status || 'Pending').toLowerCase();
     const orderAddress = (address || '').trim();
     const orderPaymentMethod = (payment_method || 'COD').trim();
+    const orderPaymentStatus = (payment_status || 'UNPAID').toUpperCase();
+    const orderPaymentId = payment_id || null;
+    const orderUid = uuidv4();
 
     if (!userId || userId <= 0 || userId !== req.user.id) {
       return res.status(403).json({ error: 'Unauthorized to create order' });
@@ -123,15 +159,18 @@ router.post('/', async (req, res) => {
     if (!['COD', 'online'].includes(orderPaymentMethod.toLowerCase())) {
       return res.status(400).json({ error: 'Invalid payment method' });
     }
+    if (!['UNPAID', 'PAID', 'SUCCESS'].includes(orderPaymentStatus)) {
+      return res.status(400).json({ error: 'Invalid payment status' });
+    }
 
     const [result] = await pool.query(
-      `INSERT INTO orders (user_id, address, total, status, payment_method, created_at)
-       VALUES (?, ?, ?, ?, ?, NOW())`,
-      [userId, orderAddress, orderTotal, orderStatus, orderPaymentMethod]
+      `INSERT INTO orders (orderUid, user_id, address, total, status, payment_method, payment_status, payment_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [orderUid, userId, orderAddress, orderTotal, orderStatus, orderPaymentMethod, orderPaymentStatus, orderPaymentId]
     );
 
     console.log(`[orders] POST / - Created order ${result.insertId} for user ${userId}`);
-    return res.status(201).json({ id: result.insertId, ok: true });
+    return res.status(201).json({ id: result.insertId, orderUid, ok: true });
   } catch (err) {
     console.error('[orders] POST / error:', err);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
@@ -310,7 +349,7 @@ router.post('/:orderId/reorder', async (req, res) => {
 
     // Fetch original order details
     const [orderRows] = await pool.query(
-      `SELECT user_id, address, payment_method
+      `SELECT user_id, address, payment_method, payment_status, payment_id
        FROM orders 
        WHERE id = ? LIMIT 1`,
       [orderId]
@@ -327,7 +366,7 @@ router.post('/:orderId/reorder', async (req, res) => {
 
     // Fetch order items
     const [orderItems] = await pool.query(
-      `SELECT name, qty, price
+      `SELECT name, qty, price, image
        FROM order_items 
        WHERE order_id = ?`,
       [orderId]
@@ -371,7 +410,7 @@ router.post('/:orderId/reorder', async (req, res) => {
         name: menuItem.name,
         qty: item.qty,
         price: menuItem.price,
-        image: menuItem.image_url || ''
+        image: menuItem.image_url || item.image || ''
       });
     }
 
@@ -388,10 +427,11 @@ router.post('/:orderId/reorder', async (req, res) => {
       await conn.beginTransaction();
 
       // Insert new order
+      const orderUid = uuidv4();
       const [orderResult] = await conn.query(
-        `INSERT INTO orders (user_id, address, total, status, payment_method, created_at)
-         VALUES (?, ?, ?, 'Pending', ?, NOW())`,
-        [req.user.id, order.address, newTotal, order.payment_method]
+        `INSERT INTO orders (orderUid, user_id, address, total, status, payment_method, payment_status, payment_id, created_at)
+         VALUES (?, ?, ?, ?, 'Pending', ?, ?, ?, NOW())`,
+        [orderUid, req.user.id, order.address, newTotal, order.payment_method, order.payment_status, order.payment_id]
       );
 
       const newOrderId = orderResult.insertId;
@@ -412,8 +452,16 @@ router.post('/:orderId/reorder', async (req, res) => {
       return res.status(201).json({
         ok: true,
         new_order_id: newOrderId,
+        orderUid,
         total: newTotal,
-        price_changes: priceChanges
+        price_changes: priceChanges,
+        items: validatedItems.map(item => ({
+          product_id: item.product_id,
+          name: item.name,
+          quantity: item.qty,
+          price: item.price,
+          image_url: item.image
+        }))
       });
     } catch (e) {
       await conn.rollback();
