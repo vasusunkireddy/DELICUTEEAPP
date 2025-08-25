@@ -79,9 +79,9 @@ router.get('/latest-orders', auth, admin, async (req, res, next) => {
   try {
     const connection = await pool.getConnection();
 
-    // Fetch latest 10 orders, join with users to get customer name (use username instead of name)
+    // Fetch latest 10 orders, join with users to get customer name (use full_name instead of username)
     const [orders] = await connection.query(
-      `SELECT o.id, COALESCE(o.customer_name, u.username, 'Unknown') as customer_name, o.total, o.status
+      `SELECT o.id, COALESCE(o.customer_name, u.full_name, 'Unknown') as customer_name, o.total, o.status
        FROM orders o
        LEFT JOIN users u ON o.user_id = u.id
        ORDER BY o.created_at DESC
