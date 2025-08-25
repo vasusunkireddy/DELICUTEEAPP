@@ -5,16 +5,16 @@ const admin = require("firebase-admin");
 const router = express.Router();
 
 // Validate environment variables
-if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || !process.env.FIREBASE_SERVICE_ACCOUNT) {
-  throw new Error("Missing required environment variables: EMAIL_USER, EMAIL_PASS, or FIREBASE_SERVICE_ACCOUNT");
+if (!process.env.MAIL_USER || !process.env.MAIL_PASS || !process.env.FIREBASE_SERVICE_ACCOUNT) {
+  throw new Error("Missing required environment variables: MAIL_USER, MAIL_PASS, or FIREBASE_SERVICE_ACCOUNT");
 }
 
 // Initialize Nodemailer transporter
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    user: process.env.MAIL_USER,
+    pass: process.env.MAIL_PASS,
   },
 });
 
@@ -42,7 +42,7 @@ async function sendAdminEmailNotification(orderId, userId, total, cartItems) {
 
   try {
     await transporter.sendMail({
-      from: `"Delicute App" <${process.env.EMAIL_USER}>`,
+      from: `"Delicute App" <${process.env.MAIL_USER}>`,
       to: payload.to,
       subject: payload.subject,
       text: payload.body,
@@ -241,7 +241,7 @@ router.post("/notifications/email", async (req, res) => {
 
   try {
     await transporter.sendMail({
-      from: `"Delicute App" <${process.env.EMAIL_USER}>`,
+      from: `"Delicute App" <${process.env.MAIL_USER}>`,
       to,
       subject,
       text: body,
