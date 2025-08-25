@@ -1,66 +1,104 @@
-const express = require("express");
+const express = require('express');
+const dayjs = require('dayjs');
 const router = express.Router();
-const pool = require("../db"); // your MySQL pool
-const authenticate = require("../middleware/authenticate");
+const pool = require('../db'); // MySQL connection pool
+const auth = require('../middleware/auth');
+const admin = require('../middleware/admin');
 
-// Dashboard stats
-router.get("/stats", authenticate, async (req, res) => {
+// GET /api/adminhome/stats
+// Returns stats for AdminHomeScreen: ordersToday, pendingOrders, totalOrders, totalRevenue, avgOrderValue, last7Days
+router.get('/stats', auth, admin, async (req, res, next) => {
   try {
-    const [[ordersToday]] = await pool.query(
-      "SELECT COUNT(*) as total FROM orders WHERE DATE(created_at) = CURDATE()"
+    const connection = await pool.getConnection();
+
+    // Get today's date in IST
+    const today = dayjs();
+    const todayStart = today.startOf('day').format('YYYY-MM-DD HH:mm:ss');
+    const todayEnd = today.endOf('day').format('YYYY-MM-DD HH:mm:ss');
+
+    // Orders today
+    const [ordersTodayResult] = await connection.query(
+      'SELECT COUNT(*) as count FROM orders WHERE created_at >= ? AND created_at < ?',
+      [todayStart, todayEnd]
     );
-    const [[revenueToday]] = await pool.query(
-      "SELECT COALESCE(SUM(total),0) as revenue FROM orders WHERE DATE(created_at) = CURDATE()"
+
+    // Pending orders
+    const [pendingOrdersResult] = await connection.query(
+      'SELECT COUNT(*) as count FROM orders WHERE status = ?',
+      ['Pending']
     );
-    const [[pending]] = await pool.query(
-      "SELECT COUNT(*) as total FROM orders WHERE status='pending'"
+
+    // Total orders
+    const [totalOrdersResult] = await connection.query(
+      'SELECT COUNT(*) as count FROM orders'
     );
-    const [[lowStock]] = await pool.query(
-      "SELECT COUNT(*) as total FROM menu WHERE stock < 5"
+
+    // Total revenue
+    const [totalRevenueResult] = await connection.query(
+      'SELECT SUM(total) as total FROM orders'
     );
+
+    // Average order value
+    const [avgOrderValueResult] = await connection.query(
+      'SELECT AVG(total) as avg FROM orders'
+    );
+
+    // Last 7 days orders
+    const sevenDaysAgo = today.subtract(7, 'day').startOf('day').format('YYYY-MM-DD HH:mm:ss');
+    const [last7DaysResult] = await connection.query(
+      `SELECT DATE_FORMAT(created_at, '%Y-%m-%d') as day, COUNT(*) as orders 
+       FROM orders 
+       WHERE created_at >= ? 
+       GROUP BY DATE(created_at) 
+       ORDER BY day DESC`,
+      [sevenDaysAgo]
+    );
+
+    connection.release();
 
     res.json({
-      ordersToday: ordersToday.total,
-      revenueToday: revenueToday.revenue,
-      pendingOrders: pending.total,
-      lowStock: lowStock.total,
+      ordersToday: ordersTodayResult[0].count || 0,
+      pendingOrders: pendingOrdersResult[0].count || 0,
+      totalOrders: totalOrdersResult[0].count || 0,
+      totalRevenue: parseFloat(totalRevenueResult[0].total || 0).toFixed(2),
+      avgOrderValue: parseFloat(avgOrderValueResult[0].avg || 0).toFixed(2),
+      last7Days: last7DaysResult.map(row => ({
+        day: row.day,
+        orders: row.orders,
+      })),
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Something went wrong" });
+  } catch (error) {
+    console.error('Stats error:', error.message);
+    next(error); // Use server's error handler
   }
 });
 
-// Latest 5 orders
-router.get("/latest-orders", authenticate, async (req, res) => {
+// GET /api/adminhome/latest-orders
+// Returns latest 10 orders with id, customer_name, total, status
+router.get('/latest-orders', auth, admin, async (req, res, next) => {
   try {
-    const [rows] = await pool.query(
-      `SELECT id, customer_name, total, status 
-       FROM orders 
-       ORDER BY created_at DESC 
-       LIMIT 5`
+    const connection = await pool.getConnection();
+
+    // Fetch latest 10 orders, join with users to get customer name
+    const [orders] = await connection.query(
+      `SELECT o.id, COALESCE(o.customer_name, u.name, 'Unknown') as customer_name, o.total, o.status
+       FROM orders o
+       LEFT JOIN users u ON o.user_id = u.id
+       ORDER BY o.created_at DESC
+       LIMIT 10`
     );
-    res.json(rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Something went wrong" });
-  }
-});
 
-// Weekly orders chart
-router.get("/weekly-orders", authenticate, async (req, res) => {
-  try {
-    const [rows] = await pool.query(`
-      SELECT DAYNAME(created_at) as day, COUNT(*) as total
-      FROM orders
-      WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-      GROUP BY DAYNAME(created_at)
-      ORDER BY created_at ASC
-    `);
-    res.json(rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Something went wrong" });
+    connection.release();
+
+    res.json(orders.map(order => ({
+      id: order.id.toString(), // Convert to string for frontend
+      customer_name: order.customer_name,
+      total: parseFloat(order.total).toFixed(2), // Format as string with 2 decimals
+      status: order.status,
+    })));
+  } catch (error) {
+    console.error('Latest orders error:', error.message);
+    next(error); // Use server's error handler
   }
 });
 

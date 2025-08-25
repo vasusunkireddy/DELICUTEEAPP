@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const cors = require('cors');
 const morgan = require('morgan');
 const compression = require('compression');
@@ -8,19 +10,32 @@ const path = require('path');
 const fs = require('fs');
 const cron = require('node-cron');
 const multer = require('multer');
-
-const pool = require('./db'); // ✅ DB connection pool
+const pool = require('./db'); // DB connection pool
 const { broadcastNotification } = require('./utils/push');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: (origin, cb) => {
+      const allowed =
+        !origin ||
+        origin === 'https://delicuteeapp.onrender.com' ||
+        /^http:\/\/localhost:(1900\d|8081|3000)$/.test(origin) ||
+        /^http:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin);
+      cb(null, allowed);
+    },
+    credentials: true,
+  },
+});
 
 /* ─── Render / Proxy ─── */
 app.set('trust proxy', 1);
 
 /* ─── Route imports ─── */
 const authRoutes = require('./routes/auth.routes');
-const menuRoutes = require('./routes/menu.routes');              // admin CRUD for menu
+const menuRoutes = require('./routes/menu.routes');
 const ordersRoutes = require('./routes/order.routes');
 const myOrdersRoutes = require('./routes/myorders.routes');
 const cartRoutes = require('./routes/cart.routes');
@@ -30,7 +45,7 @@ const profileRoutes = require('./routes/profile.route');
 const paymentsRoutes = require('./routes/payments.routes');
 const customersRoutes = require('./routes/customers.routes');
 const bannersRoutes = require('./routes/banners.routes');
-const notificationsRoutes = require('./routes/notifications.routes'); // ✅ corrected below
+const notificationsRoutes = require('./routes/notifications.routes');
 const ticketsRoutes = require('./routes/tickets.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const feedbackRoutes = require('./routes/feedback.routes');
@@ -42,12 +57,12 @@ const customerOrdersRoutes = require('./routes/customerorders.routes');
 const favoritesRoutes = require('./routes/favorites.routes');
 const userRoutes = require('./routes/user.routes');
 const categoriesRoutes = require('./routes/categories.routes');
-const deliveryZonesRoutes = require('./routes/deliveryzones.routes'); // ⬅️ has POST /check
+const deliveryZonesRoutes = require('./routes/deliveryzones.routes');
 const waitlistRoutes = require('./routes/waitlist.routes');
-const adminHomeRoutes = require('./routes/home.routes');
+const adminHomeRoutes = require('./routes/admin.routes');
 
 /* ─── Ensure uploads directories ─── */
-const uploadsBase = path.join(__dirname, 'uploads');
+const uploadsBase = path.join(__dirname, 'Uploads');
 const bannersDir = path.join(uploadsBase, 'banners');
 const avatarsDir = path.join(uploadsBase, 'avatars');
 const messagesDir = path.join(uploadsBase, 'messages');
@@ -76,12 +91,11 @@ const fileFilter = (_req, file, cb) => {
 const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
 
 /* ─── CORS ─── */
-const PROD_ORIGIN = 'https://delicuteeapp.onrender.com'; // verify this is your real host
 const corsOptions = {
   origin: (origin, cb) => {
     const allowed =
       !origin ||
-      origin === PROD_ORIGIN ||
+      origin === 'https://delicuteeapp.onrender.com' ||
       /^http:\/\/localhost:(1900\d|8081|3000)$/.test(origin) ||
       /^http:\/\/192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(origin);
     cb(null, allowed);
@@ -121,12 +135,41 @@ app.post('/upload', upload.single('image'), (req, res) => {
   }
 });
 
-/* ─── API Routes ─── */
-/* PUBLIC-FIRST: put zones + waitlist before anything that could intercept */
-app.use('/api/zones', deliveryZonesRoutes);       
-app.use('/api/waitlist', waitlistRoutes);         
+/* ─── Socket.IO for real-time order updates ─── */
+io.on('connection', (socket) => {
+  console.log('Admin connected:', socket.id);
+  socket.on('disconnect', () => console.log('Admin disconnected:', socket.id));
+});
 
-/* General public + auth-mixed routes */
+// Function to emit new order event (call in order.routes.js)
+async function notifyNewOrder(orderId) {
+  try {
+    const [order] = await pool.query(
+      `SELECT o.id, COALESCE(o.customer_name, u.name, 'Unknown') as customer_name, o.total, o.status
+       FROM orders o
+       LEFT JOIN users u ON o.user_id = u.id
+       WHERE o.id = ?`,
+      [orderId]
+    );
+    if (order[0]) {
+      io.emit('newOrder', {
+        id: order[0].id.toString(),
+        customer_name: order[0].customer_name,
+        total: parseFloat(order[0].total).toFixed(2),
+        status: order[0].status,
+      });
+    }
+  } catch (error) {
+    console.error('Notify new order error:', error.message);
+  }
+}
+
+// Export notifyNewOrder for use in order.routes.js
+module.exports.notifyNewOrder = notifyNewOrder;
+
+/* ─── API Routes ─── */
+app.use('/api/zones', deliveryZonesRoutes);
+app.use('/api/waitlist', waitlistRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/menubrowse', browseRoutes);
 app.use('/api/browse', browseRoutes);
@@ -150,14 +193,10 @@ app.use('/api/contactus', contactUsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/adminhome', adminHomeRoutes);
-
-/* ✅ FIXED: mount notifications at /api (not /api/notifications) */
 app.use('/api', notificationsRoutes);
-
-/* Admin menu CRUD under /api/menu-admin */
 app.use('/api/menu-admin', menuRoutes);
 
-/* Legacy redirect for menu */
+/* ─── Legacy redirect for menu ─── */
 app.get('/api/menu', (_req, res) => res.redirect(308, '/api/menubrowse'));
 app.get('/api/menu/:id', (req, res) =>
   res.redirect(308, `/api/menubrowse/${encodeURIComponent(req.params.id)}`)
@@ -165,7 +204,7 @@ app.get('/api/menu/:id', (req, res) =>
 
 /* ─── 404 ─── */
 app.use((req, res) => {
-  console.log(`⚠️  404: ${req.method} ${req.originalUrl}`);
+  console.log(`⚠️ 404: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ message: '🚫 Endpoint not found' });
 });
 
@@ -193,6 +232,6 @@ cron.schedule('*/2 * * * *', async () => {
 });
 
 /* ─── Start ─── */
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 Delicute API running at http://localhost:${PORT}`);
 });
