@@ -47,6 +47,8 @@ router.get('/user/:userId', async (req, res) => {
          o.total, 
          o.created_at, 
          o.rating,
+         o.address,
+         o.payment_method,
          JSON_ARRAYAGG(
            JSON_OBJECT(
              'menu_item_id', COALESCE(mi.id, oi.id),
@@ -60,7 +62,7 @@ router.get('/user/:userId', async (req, res) => {
        LEFT JOIN order_items oi ON o.id = oi.order_id
        LEFT JOIN menu_items mi ON oi.name = mi.name
        WHERE o.user_id = ?
-       GROUP BY o.id, o.status, o.total, o.created_at, o.rating
+       GROUP BY o.id, o.status, o.total, o.created_at, o.rating, o.address, o.payment_method
        ORDER BY o.created_at DESC`,
       [userId]
     );
@@ -80,7 +82,9 @@ router.get('/user/:userId', async (req, res) => {
           : item.image_url || ''
       })) : [],
       total: toFloat(order.total, 0),
-      rating: toInt(order.rating)
+      rating: toInt(order.rating),
+      address: order.address || '',
+      payment_method: order.payment_method || 'COD'
     }));
 
     console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
@@ -90,6 +94,95 @@ router.get('/user/:userId', async (req, res) => {
     return res.status(200).json(normalizedOrders);
   } catch (err) {
     console.error('[orders] GET /user/:userId error:', err);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+/* ------------------------ POST /customer-orders ------------------------ */
+router.post('/', async (req, res) => {
+  try {
+    const { user_id, address, total, status, payment_method } = req.body;
+    const userId = toInt(user_id);
+    const orderTotal = toFloat(total, 0);
+    const orderStatus = (status || 'Pending').toLowerCase();
+    const orderAddress = (address || '').trim();
+    const orderPaymentMethod = (payment_method || 'COD').trim();
+
+    if (!userId || userId <= 0 || userId !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized to create order' });
+    }
+    if (!orderAddress) {
+      return res.status(400).json({ error: 'Address is required' });
+    }
+    if (orderTotal <= 0) {
+      return res.status(400).json({ error: 'Invalid order total' });
+    }
+    if (!['pending', 'processing', 'confirmed', 'shipped', 'delivered', 'cancelled'].includes(orderStatus)) {
+      return res.status(400).json({ error: 'Invalid order status' });
+    }
+    if (!['COD', 'online'].includes(orderPaymentMethod.toLowerCase())) {
+      return res.status(400).json({ error: 'Invalid payment method' });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO orders (user_id, address, total, status, payment_method, created_at)
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [userId, orderAddress, orderTotal, orderStatus, orderPaymentMethod]
+    );
+
+    console.log(`[orders] POST / - Created order ${result.insertId} for user ${userId}`);
+    return res.status(201).json({ id: result.insertId, ok: true });
+  } catch (err) {
+    console.error('[orders] POST / error:', err);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+/* ------------------------ POST /order-items ------------------------ */
+router.post('/order-items', async (req, res) => {
+  try {
+    const { order_id, product_id, name, qty, price, image } = req.body;
+    const orderId = toInt(order_id);
+    const productId = toInt(product_id);
+    const quantity = toInt(qty, 1);
+    const itemPrice = toFloat(price, 0);
+    const itemName = (name || '').trim();
+    const itemImage = (image || '').trim();
+
+    if (!orderId || orderId <= 0) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+    if (!productId || productId <= 0) {
+      return res.status(400).json({ error: 'Invalid product ID' });
+    }
+    if (!itemName) {
+      return res.status(400).json({ error: 'Item name is required' });
+    }
+    if (quantity <= 0) {
+      return res.status(400).json({ error: 'Invalid quantity' });
+    }
+    if (itemPrice <= 0) {
+      return res.status(400).json({ error: 'Invalid price' });
+    }
+
+    const [orderRows] = await pool.query(
+      `SELECT user_id FROM orders WHERE id = ? LIMIT 1`,
+      [orderId]
+    );
+    if (!orderRows.length || orderRows[0].user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized to add items to this order' });
+    }
+
+    await pool.query(
+      `INSERT INTO order_items (order_id, product_id, name, qty, price, image)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [orderId, productId, itemName, quantity, itemPrice, itemImage]
+    );
+
+    console.log(`[orders] POST /order-items - Added item ${itemName} to order ${orderId}`);
+    return res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('[orders] POST /order-items error:', err);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
@@ -203,6 +296,132 @@ router.post('/:orderId/rate', async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[orders] POST /:orderId/rate error:', err);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+/* ------------------------ POST /customer-orders/:orderId/reorder ------------------------ */
+router.post('/:orderId/reorder', async (req, res) => {
+  try {
+    const orderId = toInt(req.params.orderId);
+    if (!orderId || orderId <= 0) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    // Fetch original order details
+    const [orderRows] = await pool.query(
+      `SELECT user_id, address, payment_method
+       FROM orders 
+       WHERE id = ? LIMIT 1`,
+      [orderId]
+    );
+
+    if (!orderRows.length) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const order = orderRows[0];
+    if (order.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized to reorder this order' });
+    }
+
+    // Fetch order items
+    const [orderItems] = await pool.query(
+      `SELECT name, qty, price
+       FROM order_items 
+       WHERE order_id = ?`,
+      [orderId]
+    );
+
+    if (!orderItems.length) {
+      return res.status(400).json({ error: 'No items found in the order' });
+    }
+
+    // Check item availability and price updates
+    const unavailableItems = [];
+    const priceChanges = [];
+    let newTotal = 0;
+
+    const validatedItems = [];
+    for (const item of orderItems) {
+      const [menuItemRows] = await pool.query(
+        `SELECT id, name, price, image_url, available 
+         FROM menu_items 
+         WHERE name = ? AND available = 1 LIMIT 1`,
+        [item.name]
+      );
+
+      if (!menuItemRows.length) {
+        unavailableItems.push(item.name);
+        continue;
+      }
+
+      const menuItem = menuItemRows[0];
+      if (menuItem.price !== item.price) {
+        priceChanges.push({
+          name: item.name,
+          old_price: item.price,
+          new_price: menuItem.price
+        });
+      }
+
+      newTotal += menuItem.price * item.qty;
+      validatedItems.push({
+        product_id: menuItem.id,
+        name: menuItem.name,
+        qty: item.qty,
+        price: menuItem.price,
+        image: menuItem.image_url || ''
+      });
+    }
+
+    if (unavailableItems.length > 0) {
+      return res.status(400).json({
+        error: 'Some items are unavailable',
+        unavailable_items: unavailableItems
+      });
+    }
+
+    // Create new order in a transaction
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Insert new order
+      const [orderResult] = await conn.query(
+        `INSERT INTO orders (user_id, address, total, status, payment_method, created_at)
+         VALUES (?, ?, ?, 'Pending', ?, NOW())`,
+        [req.user.id, order.address, newTotal, order.payment_method]
+      );
+
+      const newOrderId = orderResult.insertId;
+
+      // Insert order items
+      for (const item of validatedItems) {
+        await conn.query(
+          `INSERT INTO order_items (order_id, product_id, name, qty, price, image)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [newOrderId, item.product_id, item.name, item.qty, item.price, item.image]
+        );
+      }
+
+      await conn.commit();
+      conn.release();
+
+      console.log(`[orders] POST /:orderId/reorder - Order ${orderId} reordered as new order ${newOrderId} for user ${req.user.id}`);
+      return res.status(201).json({
+        ok: true,
+        new_order_id: newOrderId,
+        total: newTotal,
+        price_changes: priceChanges
+      });
+    } catch (e) {
+      await conn.rollback();
+      conn.release();
+      throw e;
+    }
+  } catch (err) {
+    console.error('[orders] POST /:orderId/reorder error:', err);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
