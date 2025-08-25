@@ -49,12 +49,11 @@ router.get('/user/:userId', async (req, res) => {
          o.rating,
          JSON_ARRAYAGG(
            JSON_OBJECT(
-             'menu_item_id', mi.id,
+             'menu_item_id', COALESCE(mi.id, oi.id),
              'quantity', oi.qty,
              'price', oi.price,
              'name', oi.name,
-             'image_url', COALESCE(oi.image, mi.image_url, ''),
-             'is_available', COALESCE(mi.available, 0)
+             'image_url', COALESCE(oi.image, mi.image_url, '')
            )
          ) AS items
        FROM orders o
@@ -72,81 +71,26 @@ router.get('/user/:userId', async (req, res) => {
       ...order,
       items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
         ...item,
-        menu_item_id: toInt(item.menu_item_id, null), // Allow null for unmatched items
+        menu_item_id: toInt(item.menu_item_id, 0),
         quantity: toInt(item.quantity, 1),
         price: toFloat(item.price, 0),
         name: item.name || 'Unknown Item',
-        image_url: item.image_url && item.image_url.startsWith('/')
-          ? `${baseUrl}${item.image_url}`
-          : item.image_url || '',
-        is_available: item.is_available !== undefined ? Boolean(item.is_available) : false
+        image_url: item.image_url && item.image_url.startsWith('/') 
+          ? `${baseUrl}${item.image_url}` 
+          : item.image_url || ''
       })) : [],
       total: toFloat(order.total, 0),
-      rating: toInt(order.rating),
+      rating: toInt(order.rating)
     }));
 
     console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
-      orders: normalizedOrders.map(o => ({
-        id: o.id,
-        items: o.items.map(i => ({
-          menu_item_id: i.menu_item_id,
-          name: i.name,
-          is_available: i.is_available
-        }))
-      }))
+      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ menu_item_id: i.menu_item_id, name: i.name })) }))
     });
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).json(normalizedOrders);
   } catch (err) {
     console.error('[orders] GET /user/:userId error:', err);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
-});
-
-/* ------------------------ GET /menu/:menuItemId ------------------------ */
-router.get('/menu/:menuItemId', async (req, res) => {
-  try {
-    const menuItemId = toInt(req.params.menuItemId);
-    if (!menuItemId || menuItemId <= 0) {
-      console.warn(`[orders] GET /menu/:menuItemId - Invalid menu item ID: ${req.params.menuItemId}`);
-      return res.status(400).json({ error: 'Invalid menu item ID' });
-    }
-
-    const [rows] = await pool.query(
-      `SELECT 
-         id,
-         name,
-         price,
-         image_url,
-         available AS is_active
-       FROM menu_items 
-       WHERE id = ? LIMIT 1`,
-      [menuItemId]
-    );
-
-    if (!rows.length) {
-      console.warn(`[orders] GET /menu/:menuItemId - Menu item ${menuItemId} not found`);
-      return res.status(404).json({ error: 'Menu item not found', menuItemId });
-    }
-
-    const item = rows[0];
-    const baseUrl = 'https://delicuteeapp.onrender.com';
-    const normalizedItem = {
-      id: toInt(item.id, 0),
-      name: item.name || 'Unknown Item',
-      price: toFloat(item.price, 0),
-      image_url: item.image_url && item.image_url.startsWith('/')
-        ? `${baseUrl}${item.image_url}`
-        : item.image_url || '',
-      is_active: item.is_active === 1
-    };
-
-    console.log(`[orders] GET /menu/:menuItemId - Fetched item ${menuItemId}:`, normalizedItem);
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    return res.status(200).json(normalizedItem);
-  } catch (err) {
-    console.error('[orders] GET /menu/:menuItemId error:', err);
-    res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 
