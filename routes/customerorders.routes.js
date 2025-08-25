@@ -1,6 +1,5 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const pool = require('../db'); // Import notifyNewOrder from app.js
+const pool = require('../db');
 
 const router = express.Router();
 
@@ -24,7 +23,7 @@ router.get('/user/:userId', async (req, res) => {
            oi.name,
            oi.qty AS quantity,
            oi.price,
-           oi.rating AS item_rating,
+           oi.rating AS item_rating,          -- NEW: surface per-item rating
            m.image_url AS menu_image,
            oi.image AS fallback_image
          FROM order_items oi
@@ -40,7 +39,7 @@ router.get('/user/:userId', async (req, res) => {
         name: it.name,
         quantity: it.quantity,
         price: it.price,
-        rating: it.item_rating ?? null,
+        rating: it.item_rating ?? null,       // NEW
         image_url: it.menu_image || it.fallback_image || null,
       }));
     }
@@ -91,7 +90,6 @@ router.post('/', async (req, res) => {
     );
 
     await conn.commit();
-    await notifyNewOrder(orderId); // Notify admins of new order
     res.status(201).json({ success: true, orderId });
   } catch (err) {
     await conn.rollback();
@@ -198,163 +196,6 @@ router.post('/:id/rate', async (req, res) => {
     await conn.rollback();
     console.error('[Rate Order Error]', err);
     res.status(500).json({ error: 'Failed to rate order' });
-  } finally {
-    conn.release();
-  }
-});
-
-/**
- * POST /api/customer-orders/:id/reorder
- * Reorder an existing order, checking item availability and creating a new order.
- */
-router.post('/:id/reorder', async (req, res) => {
-  const { id } = req.params;
-
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-
-    // 1) Fetch the original order
-    const [[order]] = await conn.query(
-      `SELECT id, user_id, address, payment_method, payment_status, payment_id
-       FROM orders
-       WHERE id = ?`,
-      [id]
-    );
-    if (!order) {
-      await conn.rollback();
-      return res.status(404).json({ error: 'Order not found' });
-    }
-
-    // 2) Fetch order items
-    const [items] = await conn.query(
-      `SELECT
-         product_id,
-         name,
-         qty AS quantity,
-         price,
-         image
-       FROM order_items
-       WHERE order_id = ?`,
-      [id]
-    );
-
-    if (!items.length) {
-      await conn.rollback();
-      return res.status(400).json({ error: 'No items found in order' });
-    }
-
-    // 3) Check item availability and price changes
-    const unavailableItems = [];
-    const priceChanges = [];
-    const newItems = [];
-
-    for (const item of items) {
-      let menuItem = null;
-      if (item.product_id) {
-        const [[mi]] = await conn.query(
-          `SELECT id, name, price, available, image_url
-           FROM menu_items
-           WHERE id = ?`,
-          [item.product_id]
-        );
-        menuItem = mi;
-      } else {
-        // Fallback for legacy orders without product_id
-        const [[mi]] = await conn.query(
-          `SELECT id, name, price, available, image_url
-           FROM menu_items
-           WHERE name = ?`,
-          [item.name]
-        );
-        menuItem = mi;
-      }
-
-      if (!menuItem || !menuItem.available) {
-        unavailableItems.push(item.name);
-        continue;
-      }
-
-      newItems.push({
-        productId: menuItem.id,
-        name: menuItem.name,
-        quantity: item.quantity,
-        price: menuItem.price,
-        image_url: menuItem.image_url || item.image || null,
-      });
-
-      if (menuItem.price !== item.price) {
-        priceChanges.push({
-          name: item.name,
-          old_price: item.price,
-          new_price: menuItem.price,
-        });
-      }
-    }
-
-    if (unavailableItems.length) {
-      await conn.rollback();
-      return res.status(400).json({ error: 'Some items are unavailable', unavailable_items: unavailableItems });
-    }
-
-    if (!newItems.length) {
-      await conn.rollback();
-      return res.status(400).json({ error: 'No valid items to reorder' });
-    }
-
-    // 4) Calculate new total
-    const total = newItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
-
-    // 5) Create new order
-    const [orderResult] = await conn.query(
-      `INSERT INTO orders (user_id, address, total, status, payment_method, payment_status, payment_id)
-       VALUES (?, ?, ?, 'Pending', ?, ?, ?)`,
-      [order.user_id, order.address, total, order.payment_method, order.payment_status, order.payment_id]
-    );
-
-    const newOrderId = orderResult.insertId;
-
-    // 6) Insert new order items
-    const values = newItems.map(it => [
-      newOrderId,
-      it.productId,
-      it.name,
-      it.quantity,
-      it.price,
-      it.image_url,
-    ]);
-
-    await conn.query(
-      `INSERT INTO order_items (order_id, product_id, name, qty, price, image)
-       VALUES ?`,
-      [values]
-    );
-
-    // 7) Generate orderUid
-    const orderUid = `ORD-${newOrderId}-${Date.now().toString(36)}`;
-
-    await conn.query(
-      `UPDATE orders SET orderUid = ? WHERE id = ?`,
-      [orderUid, newOrderId]
-    );
-
-    await conn.commit();
-
-    // 8) Notify admins of new order
-    await notifyNewOrder(newOrderId);
-
-    res.status(201).json({
-      ok: true,
-      new_order_id: newOrderId,
-      orderUid,
-      total,
-      items: newItems,
-      price_changes: priceChanges,
-    });
-  } catch (err) {
-    await conn.rollback();
-    console.error('[Reorder Error]', err);
-    res.status(500).json({ error: 'Failed to process reorder' });
   } finally {
     conn.release();
   }
