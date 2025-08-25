@@ -1,6 +1,6 @@
 const express = require('express');
-const pool = require('../db');
-const { notifyNewOrder } = require('../app'); // Import notifyNewOrder from app.js
+const jwt = require('jsonwebtoken');
+const pool = require('../db'); // Import notifyNewOrder from app.js
 
 const router = express.Router();
 
