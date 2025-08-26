@@ -11,8 +11,8 @@ router.post("/customer-orders", async (req, res) => {
     return res.status(400).json({ error: "Missing or invalid fields (userId, address, total, cartItems, payment, status)" });
   }
 
-  if (payment !== "COD") {
-    return res.status(400).json({ error: "Only Cash on Delivery (COD) is supported" });
+  if (payment !== "COD" && payment !== "UPI") {
+    return res.status(400).json({ error: "Only Cash on Delivery (COD) and UPI are supported" });
   }
 
   const conn = await pool.getConnection();
@@ -52,8 +52,8 @@ router.post("/customer-orders", async (req, res) => {
 
 // POST /api/payments/create
 router.post("/create", async (req, res) => {
-  const { orderId, customerId, method, amount } = req.body;
-  console.log("📡 POST /api/payments/create", { orderId, customerId, method, amount });
+  const { orderId, customerId, method, amount, transactionId } = req.body;
+  console.log("📡 POST /api/payments/create", { orderId, customerId, method, amount, transactionId });
 
   if (!orderId || !customerId || !method || !amount || amount <= 0) {
     return res.status(400).json({
@@ -61,8 +61,8 @@ router.post("/create", async (req, res) => {
     });
   }
 
-  if (method !== "COD") {
-    return res.status(400).json({ error: "Only Cash on Delivery (COD) is supported" });
+  if (method !== "COD" && method !== "UPI") {
+    return res.status(400).json({ error: "Only Cash on Delivery (COD) and UPI are supported" });
   }
 
   const conn = await pool.getConnection();
@@ -79,14 +79,14 @@ router.post("/create", async (req, res) => {
     }
 
     const [result] = await conn.query(
-      `INSERT INTO payments (orderId, customerId, method, amount, status, paidAt)
-       VALUES (?, ?, ?, ?, ?, NOW())`,
-      [orderId, customerId, method, amount, "SUCCESS"]
+      `INSERT INTO payments (orderId, customerId, method, amount, transaction_id, status, paidAt)
+       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [orderId, customerId, method, amount, transactionId || null, method === "COD" ? "SUCCESS" : "PENDING"]
     );
 
     await conn.query(
       `UPDATE orders SET payment_status = ?, payment_method = ?, payment_id = ? WHERE id = ? AND user_id = ?`,
-      ["SUCCESS", method, result.insertId, orderId, customerId]
+      [method === "COD" ? "SUCCESS" : "PENDING", method, result.insertId, orderId, customerId]
     );
 
     await conn.commit();
@@ -94,12 +94,12 @@ router.post("/create", async (req, res) => {
     res.json({
       success: true,
       paymentId: result.insertId,
-      status: "SUCCESS",
+      status: method === "COD" ? "SUCCESS" : "PENDING",
       orderId,
     });
   } catch (err) {
     await conn.rollback();
-    console.error("�fire; CREATE PAYMENT ERROR:", err.message);
+    console.error("🔥 CREATE PAYMENT ERROR:", err.message);
     res.status(500).json({ error: "Failed to create payment" });
   } finally {
     conn.release();
