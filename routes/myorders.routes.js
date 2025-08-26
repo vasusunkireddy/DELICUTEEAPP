@@ -47,15 +47,18 @@ router.get('/user/:userId', async (req, res) => {
          o.total, 
          o.created_at, 
          o.rating,
-         JSON_ARRAYAGG(
-           JSON_OBJECT(
-             'menu_item_id', COALESCE(oi.product_id, oi.id),
-             'quantity', oi.qty,
-             'price', oi.price,
-             'name', oi.name,
-             'image_url', COALESCE(oi.image, mi.image_url, ''),
-             'is_available', COALESCE(mi.available, 1)
-           )
+         COALESCE(
+           JSON_ARRAYAGG(
+             JSON_OBJECT(
+               'menu_item_id', COALESCE(oi.product_id, oi.id),
+               'quantity', oi.qty,
+               'price', oi.price,
+               'name', oi.name,
+               'image_url', COALESCE(oi.image, mi.image_url, ''),
+               'is_available', COALESCE(mi.available, 1)
+             )
+           ) FILTER (WHERE oi.id IS NOT NULL),
+           '[]'
          ) AS items
        FROM orders o
        LEFT JOIN order_items oi ON o.id = oi.order_id
@@ -68,22 +71,35 @@ router.get('/user/:userId', async (req, res) => {
 
     // Normalize response to ensure items is always an array and image_url is absolute
     const baseUrl = 'https://delicuteeapp.onrender.com';
-    const normalizedOrders = orders.map(order => ({
-      ...order,
-      items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
-        ...item,
-        menu_item_id: toInt(item.menu_item_id, 0),
-        quantity: toInt(item.quantity, 1),
-        price: toFloat(item.price, 0),
-        name: item.name || 'Unknown Item',
-        image_url: item.image_url && item.image_url.startsWith('/') 
-          ? `${baseUrl}${item.image_url}` 
-          : item.image_url || '',
-        is_available: item.is_available !== undefined ? Boolean(item.is_available) : true
-      })) : [],
-      total: toFloat(order.total, 0),
-      rating: toInt(order.rating),
-    }));
+    const normalizedOrders = orders.map(order => {
+      let items = [];
+      try {
+        // Ensure items is a string and parse it, default to empty array if invalid
+        if (typeof order.items === 'string' && order.items !== 'null') {
+          items = JSON.parse(order.items);
+        }
+      } catch (e) {
+        console.error(`[orders] Failed to parse items for order ${order.id}:`, e.message);
+        items = [];
+      }
+
+      return {
+        ...order,
+        items: Array.isArray(items) ? items.map(item => ({
+          ...item,
+          menu_item_id: toInt(item.menu_item_id, 0),
+          quantity: toInt(item.quantity, 1),
+          price: toFloat(item.price, 0),
+          name: item.name || 'Unknown Item',
+          image_url: item.image_url && item.image_url.startsWith('/') 
+            ? `${baseUrl}${item.image_url}` 
+            : item.image_url || '',
+          is_available: item.is_available !== undefined ? Boolean(item.is_available) : true
+        })) : [],
+        total: toFloat(order.total, 0),
+        rating: toInt(order.rating),
+      };
+    });
 
     console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
       orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ menu_item_id: i.menu_item_id, name: i.name, is_available: i.is_available })) }))
