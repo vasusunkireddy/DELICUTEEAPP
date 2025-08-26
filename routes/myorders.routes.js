@@ -42,52 +42,53 @@ router.get('/user/:userId', async (req, res) => {
 
     const [orders] = await pool.query(
       `SELECT 
-         o.id, 
-         o.status, 
-         o.total, 
-         o.created_at, 
-         o.rating,
-         JSON_ARRAYAGG(
-           JSON_OBJECT(
-             'menu_item_id', COALESCE(mi.id, oi.id),
-             'quantity', oi.qty,
-             'price', oi.price,
-             'name', oi.name,
-             'image_url', COALESCE(oi.image, mi.image_url, ''),
-             'is_available', COALESCE(mi.available, 1)
-           )
-         ) AS items
-       FROM orders o
-       LEFT JOIN order_items oi ON o.id = oi.order_id
-       LEFT JOIN menu_items mi ON oi.name = mi.name
-       WHERE o.user_id = ?
-       GROUP BY o.id, o.status, o.total, o.created_at, o.rating
-       ORDER BY o.created_at DESC`,
+        o.id,
+        o.status,
+        o.total,
+        o.created_at,
+        o.rating,
+        COALESCE(
+          JSON_ARRAYAGG(
+            CASE 
+              WHEN oi.id IS NOT NULL THEN JSON_OBJECT(
+                'menu_item_id', COALESCE(mi.id, oi.menu_item_id),
+                'quantity', oi.qty,
+                'price', oi.price,
+                'name', oi.name,
+                'image_url', COALESCE(mi.image_url, oi.image, ''),
+                'is_available', COALESCE(mi.available, 1)
+              )
+            END
+          ), JSON_ARRAY()
+        ) AS items
+      FROM orders o
+      LEFT JOIN order_items oi ON o.id = oi.order_id
+      LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+      WHERE o.user_id = ?
+      GROUP BY o.id, o.status, o.total, o.created_at, o.rating
+      ORDER BY o.created_at DESC`,
       [userId]
     );
 
-    // Normalize response to ensure items is always an array and image_url is absolute
     const baseUrl = 'https://delicuteeapp.onrender.com';
     const normalizedOrders = orders.map(order => ({
-      ...order,
+      id: toInt(order.id, 0),
+      status: order.status,
+      total: toFloat(order.total, 0),
+      rating: toInt(order.rating),
+      created_at: order.created_at ? new Date(order.created_at).toISOString() : null,
       items: order.items && order.items !== 'null' ? JSON.parse(order.items).map(item => ({
-        ...item,
         menu_item_id: toInt(item.menu_item_id, 0),
         quantity: toInt(item.quantity, 1),
         price: toFloat(item.price, 0),
         name: item.name || 'Unknown Item',
-        image_url: item.image_url && item.image_url.startsWith('/') 
-          ? `${baseUrl}${item.image_url}` 
+        image_url: item.image_url && item.image_url.startsWith('/')
+          ? `${baseUrl}${item.image_url}`
           : item.image_url || '',
         is_available: item.is_available !== undefined ? Boolean(item.is_available) : true
-      })) : [],
-      total: toFloat(order.total, 0),
-      rating: toInt(order.rating),
+      })) : []
     }));
 
-    console.log(`[orders] GET /user/:userId - Fetched ${normalizedOrders.length} orders for user ${userId}`, {
-      orders: normalizedOrders.map(o => ({ id: o.id, items: o.items.map(i => ({ menu_item_id: i.menu_item_id, name: i.name, is_available: i.is_available })) }))
-    });
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).json(normalizedOrders);
   } catch (err) {
@@ -100,27 +101,15 @@ router.get('/user/:userId', async (req, res) => {
 router.get('/menu/:menuItemId', async (req, res) => {
   try {
     const menuItemId = toInt(req.params.menuItemId);
-    if (!menuItemId || menuItemId <= 0) {
-      console.warn(`[orders] GET /menu/:menuItemId - Invalid menu item ID: ${req.params.menuItemId}`);
-      return res.status(400).json({ error: 'Invalid menu item ID' });
-    }
+    if (!menuItemId || menuItemId <= 0) return res.status(400).json({ error: 'Invalid menu item ID' });
 
     const [rows] = await pool.query(
-      `SELECT 
-         id,
-         name,
-         price,
-         image_url,
-         available AS is_active
-       FROM menu_items 
-       WHERE id = ? LIMIT 1`,
+      `SELECT id, name, price, image_url, available AS is_active
+       FROM menu_items WHERE id = ? LIMIT 1`,
       [menuItemId]
     );
 
-    if (!rows.length) {
-      console.warn(`[orders] GET /menu/:menuItemId - Menu item ${menuItemId} not found`);
-      return res.status(404).json({ error: 'Menu item not found', menuItemId });
-    }
+    if (!rows.length) return res.status(404).json({ error: 'Menu item not found', menuItemId });
 
     const item = rows[0];
     const baseUrl = 'https://delicuteeapp.onrender.com';
@@ -134,8 +123,6 @@ router.get('/menu/:menuItemId', async (req, res) => {
       is_active: item.is_active === 1
     };
 
-    console.log(`[orders] GET /menu/:menuItemId - Fetched item ${menuItemId}:`, normalizedItem);
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.status(200).json(normalizedItem);
   } catch (err) {
     console.error('[orders] GET /menu/:menuItemId error:', err);
@@ -148,58 +135,41 @@ router.patch('/:orderId/cancel', async (req, res) => {
   try {
     const orderId = toInt(req.params.orderId);
     const reason = (req.body.reason || '').trim();
-    if (!orderId || orderId <= 0) {
-      return res.status(400).json({ error: 'Invalid order ID' });
-    }
-    if (!reason) {
-      return res.status(400).json({ error: 'Cancellation reason is required' });
-    }
+    if (!orderId || orderId <= 0) return res.status(400).json({ error: 'Invalid order ID' });
+    if (!reason) return res.status(400).json({ error: 'Cancellation reason is required' });
 
     const [orderRows] = await pool.query(
-      `SELECT user_id, status, created_at 
-       FROM orders 
-       WHERE id = ? LIMIT 1`,
+      `SELECT user_id, status, created_at FROM orders WHERE id = ? LIMIT 1`,
       [orderId]
     );
-
-    if (!orderRows.length) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
+    if (!orderRows.length) return res.status(404).json({ error: 'Order not found' });
 
     const order = orderRows[0];
-    if (order.user_id !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to cancel this order' });
-    }
+    if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized to cancel this order' });
 
     const validStatuses = ['pending', 'processing', 'confirmed', 'shipped'];
-    if (!validStatuses.includes(order.status.toLowerCase())) {
-      return res.status(400).json({ error: 'Order cannot be canceled due to its current status' });
-    }
+    if (!validStatuses.includes(order.status.toLowerCase())) return res.status(400).json({ error: 'Order cannot be canceled due to its current status' });
 
     const CANCEL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
     const msSinceCreated = Date.now() - new Date(order.created_at).getTime();
-    if (msSinceCreated > CANCEL_WINDOW_MS) {
-      return res.status(400).json({ error: 'Cancellation window has expired' });
-    }
+    if (msSinceCreated > CANCEL_WINDOW_MS) return res.status(400).json({ error: 'Cancellation window has expired' });
 
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
       await conn.query(
-        `UPDATE orders 
-         SET status = 'cancelled', cancel_reason = ? 
-         WHERE id = ? AND user_id = ?`,
+        `UPDATE orders SET status='cancelled', cancel_reason=? WHERE id=? AND user_id=?`,
         [reason, orderId, req.user.id]
       );
       await conn.commit();
-      conn.release();
-      console.log(`[orders] PATCH /:orderId/cancel - Order ${orderId} cancelled successfully`);
-      return res.status(200).json({ ok: true });
     } catch (e) {
       await conn.rollback();
-      conn.release();
       throw e;
+    } finally {
+      conn.release();
     }
+
+    return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[orders] PATCH /:orderId/cancel error:', err);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
@@ -212,43 +182,25 @@ router.post('/:orderId/rate', async (req, res) => {
     const orderId = toInt(req.params.orderId);
     const rating = toInt(req.body.rating);
 
-    if (!orderId || orderId <= 0) {
-      return res.status(400).json({ error: 'Invalid order ID' });
-    }
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
-    }
+    if (!orderId || orderId <= 0) return res.status(400).json({ error: 'Invalid order ID' });
+    if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be between 1 and 5' });
 
     const [orderRows] = await pool.query(
-      `SELECT user_id, status, rating 
-       FROM orders 
-       WHERE id = ? LIMIT 1`,
+      `SELECT user_id, status, rating FROM orders WHERE id=? LIMIT 1`,
       [orderId]
     );
-
-    if (!orderRows.length) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
+    if (!orderRows.length) return res.status(404).json({ error: 'Order not found' });
 
     const order = orderRows[0];
-    if (order.user_id !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to rate this order' });
-    }
-    if (order.status.toLowerCase() !== 'delivered') {
-      return res.status(400).json({ error: 'Order must be delivered to rate' });
-    }
-    if (order.rating && order.rating >= 1) {
-      return res.status(400).json({ error: 'Order already rated' });
-    }
+    if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Unauthorized to rate this order' });
+    if (order.status.toLowerCase() !== 'delivered') return res.status(400).json({ error: 'Order must be delivered to rate' });
+    if (order.rating && order.rating >= 1) return res.status(400).json({ error: 'Order already rated' });
 
     await pool.query(
-      `UPDATE orders 
-       SET rating = ? 
-       WHERE id = ? AND user_id = ?`,
+      `UPDATE orders SET rating=? WHERE id=? AND user_id=?`,
       [rating, orderId, req.user.id]
     );
 
-    console.log(`[orders] POST /:orderId/rate - Order ${orderId} rated ${rating} successfully`);
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[orders] POST /:orderId/rate error:', err);
@@ -257,7 +209,7 @@ router.post('/:orderId/rate', async (req, res) => {
 });
 
 /* ------------------------ Global Error Handler ------------------------ */
-router.use((err, req, res, next) => {
+router.use((err, _req, res, _next) => {
   console.error('[orders] Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error', details: err.message });
 });
