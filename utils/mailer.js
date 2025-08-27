@@ -1,6 +1,5 @@
-// utils/mailer.js
-const nodemailer = require("nodemailer");
-require("dotenv").config();
+const nodemailer = require('nodemailer');
+require('dotenv').config();
 
 /**
  * Create a transporter.
@@ -10,7 +9,7 @@ require("dotenv").config();
  * - Put it in MAIL_PASS
  */
 const transporter = nodemailer.createTransport({
-  host: process.env.MAIL_HOST || "smtp.gmail.com",
+  host: process.env.MAIL_HOST || 'smtp.gmail.com',
   port: Number(process.env.MAIL_PORT || 465),
   secure: true, // SSL
   auth: {
@@ -21,15 +20,15 @@ const transporter = nodemailer.createTransport({
 
 // Quick health check
 transporter.verify().then(
-  () => console.log("✅ Mailer ready"),
-  (err) => console.warn("⚠️ Mailer not ready:", err?.message)
+  () => console.log('✅ Mailer ready'),
+  (err) => console.error('❌ Mailer not ready:', err.message)
 );
 
 /**
  * Send OTP email (10-minute validity)
  */
 async function sendOtpEmail(to, otp) {
-  if (!to || !otp) throw new Error("sendOtpEmail: missing to/otp");
+  if (!to || !otp) throw new Error('sendOtpEmail: missing to/otp');
 
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#000">
@@ -44,15 +43,19 @@ async function sendOtpEmail(to, otp) {
     </div>
   `;
 
-  const info = await transporter.sendMail({
-    from: `Delicute <${process.env.MAIL_USER}>`,
-    to,
-    subject: "Delicute Login OTP",
-    html,
-  });
-
-  console.log("📧 OTP email sent:", info.messageId);
-  return info;
+  try {
+    const info = await transporter.sendMail({
+      from: `Delicute <${process.env.MAIL_USER}>`,
+      to,
+      subject: 'Delicute Login OTP',
+      html,
+    });
+    console.log('📧 OTP email sent:', info.messageId);
+    return info;
+  } catch (error) {
+    console.error('❌ OTP email failed:', error.message);
+    throw error;
+  }
 }
 
 /**
@@ -60,25 +63,27 @@ async function sendOtpEmail(to, otp) {
  */
 async function sendOrderStatusEmail({ to, name, orderId, status, reason }) {
   if (!to || !orderId || !status) {
-    throw new Error("sendOrderStatusEmail: missing to/orderId/status");
+    throw new Error('sendOrderStatusEmail: missing to/orderId/status');
   }
 
   const subject = `Delicute Order #${orderId} - Status Update`;
 
   const statusMessage = {
+    Pending: `Your order #${orderId} has been received and is pending confirmation.`,
+    Confirmed: `Your order #${orderId} has been confirmed and is being prepared.`,
+    Shipped: `Your order #${orderId} has been shipped and is on the way.`,
     Delivered: `We are pleased to inform you that your order #${orderId} has been successfully delivered.`,
     Cancelled: `We regret to inform you that your order #${orderId} has been cancelled.`,
-    Processing: `Your order #${orderId} is currently being processed.`,
-    Shipped: `Your order #${orderId} has been shipped and is on the way.`,
+    Refunded: `Your order #${orderId} has been refunded.`,
   };
 
   const messageBody = statusMessage[status] || `Your order #${orderId} status has been updated to ${status}.`;
 
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#000">
-      <p>Dear ${name || "Customer"},</p>
+      <p>Dear ${name || 'Customer'},</p>
       <p>${messageBody}</p>
-      ${reason ? `<p><b>Note:</b> ${reason}</p>` : ""}
+      ${reason ? `<p><b>Note:</b> ${reason}</p>` : ''}
       <p>Thank you for choosing Delicute. We value your trust and look forward to serving you again.</p>
       <p>Sincerely,<br/>Team Delicute</p>
       <hr style="border:none;border-top:1px solid #ccc"/>
@@ -86,15 +91,19 @@ async function sendOrderStatusEmail({ to, name, orderId, status, reason }) {
     </div>
   `;
 
-  const info = await transporter.sendMail({
-    from: `Delicute <${process.env.MAIL_USER}>`,
-    to,
-    subject,
-    html,
-  });
-
-  console.log("✅ Status email sent:", info.messageId);
-  return info;
+  try {
+    const info = await transporter.sendMail({
+      from: `Delicute <${process.env.MAIL_USER}>`,
+      to,
+      subject,
+      html,
+    });
+    console.log('✅ Status email sent:', info.messageId);
+    return info;
+  } catch (error) {
+    console.error('❌ Status email failed:', error.message);
+    throw error;
+  }
 }
 
 module.exports = { sendOtpEmail, sendOrderStatusEmail };
