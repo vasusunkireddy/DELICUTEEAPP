@@ -67,12 +67,16 @@ router.patch('/admin/:id/status', async (req, res) => {
   try {
     await conn.beginTransaction();
 
+    // Update payment_status only for COD when status is Delivered
     await conn.query(
       `UPDATE orders
           SET status = ?,
               cancel_reason = CASE WHEN ? = 'Cancelled' THEN ? ELSE NULL END,
               delivered_at = CASE WHEN ? = 'Delivered' THEN NOW() ELSE delivered_at END,
-              payment_status = CASE WHEN ? = 'Delivered' THEN 'PAID' ELSE payment_status END
+              payment_status = CASE 
+                WHEN ? = 'Delivered' AND payment_method = 'COD' THEN 'PAID' 
+                ELSE payment_status 
+              END
         WHERE id = ?`,
       [status, status, reason || null, status, status, id]
     );
@@ -105,16 +109,22 @@ router.patch('/admin/:id/status', async (req, res) => {
 
     await conn.commit();
 
-    if (order.email) {
-      sendOrderStatusEmail({
-        to: order.email,
-        name: order.customerName,
-        orderId: order.orderUid, // keep UID for email subject/reference
-        status: order.status,
-        reason: order.cancel_reason || '',
-      })
-        .then(() => console.log(`📧 status mail sent → ${order.email}`))
-        .catch((e) => console.warn('email failed:', e.message));
+    // Send email only if a valid email exists
+    if (order.email && order.email.includes('@')) {
+      try {
+        await sendOrderStatusEmail({
+          to: order.email,
+          name: order.customerName || 'Customer',
+          orderId: order.orderUid,
+          status: order.status,
+          reason: order.cancel_reason || '',
+        });
+        console.log(`📧 Status email sent to ${order.email} for order #${order.orderUid}`);
+      } catch (emailError) {
+        console.error(`❌ Failed to send email to ${order.email}:`, emailError.message);
+      }
+    } else {
+      console.warn(`⚠️ No valid email for order #${order.orderUid}`);
     }
 
     res.json(order);
@@ -148,9 +158,9 @@ router.delete('/admin/:id', async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    // delete items first
+    // Delete items first
     await conn.query(`DELETE FROM order_items WHERE order_id = ?`, [order.id]);
-    // delete order
+    // Delete order
     await conn.query(`DELETE FROM orders WHERE id = ?`, [order.id]);
 
     await conn.commit();
